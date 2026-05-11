@@ -1,0 +1,276 @@
+import * as http from 'http';
+import * as https from 'https';
+import * as crypto from 'crypto';
+import * as vscode from 'vscode';
+import { Logger } from '../util/Logger';
+import { OAUTH_CALLBACK_TIMEOUT } from '../constants';
+
+export interface OAuthResult {
+  code: string;
+  state: string;
+}
+
+/**
+ * Executes the OAuth2 Authorization Code flow with PKCE against OpenShift.
+ *
+ * Uses `openshift-cli-client` — the same built-in OAuth client that `oc login --web` uses.
+ * This client accepts localhost redirect URIs and supports PKCE.
+ */
+export class OAuthFlow {
+  private logger = Logger.getInstance();
+
+  /** Generate a cryptographically random code verifier for PKCE. */
+  generateCodeVerifier(): string {
+    return crypto.randomBytes(32).toString('base64url');
+  }
+
+  /** Compute the S256 code challenge from a code verifier. */
+  computeCodeChallenge(verifier: string): string {
+    return crypto.createHash('sha256').update(verifier).digest('base64url');
+  }
+
+  /** Generate a random state parameter for CSRF protection. */
+  generateState(): string {
+    return crypto.randomBytes(16).toString('hex');
+  }
+
+  /**
+   * Execute the OAuth authorization code flow with PKCE.
+   *
+   * This mirrors exactly what `oc login --web` does:
+   * 1. Start localhost callback server
+   * 2. Open browser to authorize URL with PKCE challenge
+   * 3. User authenticates via SSO
+   * 4. Browser redirects to localhost with auth code
+   * 5. Exchange code for token at /oauth/token
+   */
+  async execute(
+    authorizeUrl: string,
+    tokenUrl: string
+  ): Promise<{ accessToken: string; expiresIn?: number }> {
+    const codeVerifier = this.generateCodeVerifier();
+    const codeChallenge = this.computeCodeChallenge(codeVerifier);
+    const state = this.generateState();
+
+    // Start localhost callback server
+    const { server, port, resultPromise } = await this.startCallbackServer(state);
+
+    const redirectUri = `http://127.0.0.1:${port}/callback`;
+
+    try {
+      // Build authorization URL — same params as `oc login --web`
+      const authUrl = new URL(authorizeUrl);
+      authUrl.searchParams.set('client_id', 'openshift-cli-client');
+      authUrl.searchParams.set('redirect_uri', redirectUri);
+      authUrl.searchParams.set('response_type', 'code');
+      authUrl.searchParams.set('code_challenge', codeChallenge);
+      authUrl.searchParams.set('code_challenge_method', 'S256');
+      authUrl.searchParams.set('state', state);
+
+      this.logger.info('Opening browser for OAuth authentication...');
+      this.logger.debug(`Auth URL: ${authUrl.toString()}`);
+      await vscode.env.openExternal(vscode.Uri.parse(authUrl.toString()));
+
+      // Wait for callback with the authorization code
+      const result = await resultPromise;
+      this.logger.info('Authorization code received, exchanging for token...');
+
+      // Exchange code for token — same as `oc` does
+      const tokenResult = await this.exchangeCodeForToken(
+        tokenUrl,
+        result.code,
+        redirectUri,
+        codeVerifier
+      );
+
+      this.logger.info('Token obtained successfully');
+      return tokenResult;
+    } finally {
+      server.close();
+    }
+  }
+
+  /**
+   * Exchange the authorization code for an access token.
+   * Uses the same approach as `oc`: POST to /oauth/token with Basic auth.
+   */
+  private async exchangeCodeForToken(
+    tokenUrl: string,
+    code: string,
+    redirectUri: string,
+    codeVerifier: string
+  ): Promise<{ accessToken: string; expiresIn?: number }> {
+    const body = new URLSearchParams({
+      grant_type: 'authorization_code',
+      code,
+      redirect_uri: redirectUri,
+      code_verifier: codeVerifier,
+    }).toString();
+
+    return new Promise((resolve, reject) => {
+      const parsed = new URL(tokenUrl);
+
+      // openshift-cli-client is a public client (no secret), but oc sends
+      // Basic auth with client_id and empty password
+      const basicAuth = Buffer.from('openshift-cli-client:').toString('base64');
+
+      const options = {
+        hostname: parsed.hostname,
+        port: parsed.port || 443,
+        path: parsed.pathname + parsed.search,
+        method: 'POST',
+        timeout: 30_000,
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Content-Length': Buffer.byteLength(body),
+          'Authorization': `Basic ${basicAuth}`,
+          'Accept': 'application/json',
+        },
+      };
+
+      const req = https.request(options, (res: import('http').IncomingMessage) => {
+        let data = '';
+        res.on('data', (chunk: Buffer) => {
+          data += chunk.toString();
+          if (data.length > 1_048_576) { req.destroy(); reject(new Error('Response too large')); }
+        });
+        res.on('end', () => {
+          try {
+            const json = JSON.parse(data);
+            if (json.error) {
+              reject(new Error(`Token exchange failed: ${json.error} - ${json.error_description ?? ''}`));
+            } else if (json.access_token) {
+              resolve({
+                accessToken: String(json.access_token),
+                expiresIn: json.expires_in ? Number(json.expires_in) : undefined,
+              });
+            } else {
+              reject(new Error(`Unexpected token response: ${data.slice(0, 200)}`));
+            }
+          } catch {
+            reject(new Error(`Failed to parse token response: ${data.slice(0, 200)}`));
+          }
+        });
+      });
+
+      req.on('error', reject);
+      req.on('timeout', () => { req.destroy(); reject(new Error('Token exchange timed out')); });
+      req.write(body);
+      req.end();
+    });
+  }
+
+  /**
+   * Start a temporary HTTP server on localhost to receive the OAuth callback.
+   */
+  private startCallbackServer(
+    expectedState: string
+  ): Promise<{
+    server: http.Server;
+    port: number;
+    resultPromise: Promise<OAuthResult>;
+  }> {
+    return new Promise((resolveSetup, rejectSetup) => {
+      let resolveResult: (value: OAuthResult) => void;
+      let rejectResult: (reason: Error) => void;
+
+      const resultPromise = new Promise<OAuthResult>((res, rej) => {
+        resolveResult = res;
+        rejectResult = rej;
+      });
+
+      const server = http.createServer((req, res) => {
+        if (!req.url?.startsWith('/callback?') && req.url !== '/callback') {
+          res.writeHead(404);
+          res.end('Not found');
+          return;
+        }
+
+        const url = new URL(req.url, `http://127.0.0.1`);
+        const code = url.searchParams.get('code');
+        const state = url.searchParams.get('state');
+        const error = url.searchParams.get('error');
+
+        if (error) {
+          const desc = url.searchParams.get('error_description') ?? error;
+          res.writeHead(200, { 'Content-Type': 'text/html' });
+          res.end(this.errorPage(desc));
+          rejectResult(new Error(`OAuth error: ${desc}`));
+          return;
+        }
+
+        if (!code) {
+          res.writeHead(400, { 'Content-Type': 'text/html' });
+          res.end(this.errorPage('No authorization code received'));
+          rejectResult(new Error('No authorization code in callback'));
+          return;
+        }
+
+        if (!state || state !== expectedState) {
+          res.writeHead(400, { 'Content-Type': 'text/html' });
+          res.end(this.errorPage('Invalid state parameter'));
+          rejectResult(new Error('OAuth state mismatch — possible CSRF attack'));
+          return;
+        }
+
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end(this.successPage());
+        resolveResult({ code, state: state ?? '' });
+      });
+
+      // Listen on a random available port on 127.0.0.1
+      server.listen(0, '127.0.0.1', () => {
+        const addr = server.address();
+        if (!addr || typeof addr === 'string') {
+          rejectSetup(new Error('Failed to start callback server'));
+          return;
+        }
+
+        this.logger.debug(`OAuth callback server listening on port ${addr.port}`);
+
+        // Set a timeout for the entire flow
+        const timeout = setTimeout(() => {
+          server.close();
+          rejectResult(
+            new Error('OAuth authentication timed out. Please try again.')
+          );
+        }, OAUTH_CALLBACK_TIMEOUT);
+
+        // Clear timeout when result is received
+        resultPromise.finally(() => clearTimeout(timeout));
+
+        resolveSetup({ server, port: addr.port, resultPromise });
+      });
+
+      server.on('error', rejectSetup);
+    });
+  }
+
+  private successPage(): string {
+    return `<!DOCTYPE html>
+<html>
+<head><title>Dev Spaces - Authenticated</title></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #1e1e1e; color: #cccccc;">
+  <div style="text-align: center;">
+    <h1 style="color: #4ec9b0;">&#10003; Authentication Successful</h1>
+    <p>You can close this tab and return to your IDE.</p>
+  </div>
+</body>
+</html>`;
+  }
+
+  private errorPage(message: string): string {
+    const escaped = message.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    return `<!DOCTYPE html>
+<html>
+<head><title>Dev Spaces - Authentication Failed</title></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #1e1e1e; color: #cccccc;">
+  <div style="text-align: center;">
+    <h1 style="color: #f44747;">&#10007; Authentication Failed</h1>
+    <p>${escaped}</p>
+    <p>Please close this tab and try again from the IDE.</p>
+  </div>
+</body>
+</html>`;
+  }
+}

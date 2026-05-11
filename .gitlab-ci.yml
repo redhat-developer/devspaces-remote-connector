@@ -1,0 +1,52 @@
+# CI/CD Pipeline for Dev Spaces Connector
+
+workflow:
+  auto_cancel:
+    on_new_commit: interruptible
+  rules:
+    - if: $CI_MERGE_REQUEST_IID
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: $CI_COMMIT_TAG
+
+default:
+  interruptible: true
+  image: node:22-alpine
+
+stages:
+  - validate
+  - build
+
+.npm-install: &npm-install
+  - npm ci --include=dev
+
+lint:
+  stage: validate
+  needs: []
+  before_script: *npm-install
+  script:
+    - node scripts/fetch-ca-bundle.js
+    - npm run lint
+
+typecheck:
+  stage: validate
+  needs: []
+  before_script: *npm-install
+  script:
+    - node scripts/fetch-ca-bundle.js
+    - npx tsc --noEmit
+
+build:
+  stage: build
+  needs: ['lint', 'typecheck']
+  before_script: *npm-install
+  script:
+    - npm run compile
+    - npm run test -- --coverage --passWithNoTests
+    - npm run vsix
+    - ls -lh *.vsix
+  artifacts:
+    paths:
+      - "*.vsix"
+      - coverage/
+    expire_in: 30 days
+  coverage: '/All files[^|]*\|[^|]*\s+([\d\.]+)/'

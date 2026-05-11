@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Cloud -->
+  <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/>
+  <!-- Terminal prompt inside -->
+  <polyline points="8 15 10 17 8 19"/>
+  <line x1="12" y1="19" x2="16" y2="19"/>
+</svg>

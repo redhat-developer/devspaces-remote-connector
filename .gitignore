@@ -1,0 +1,9 @@
+node_modules/
+out/
+dist/
+*.vsix
+.vscode-test/
+.kiro_tmp/
+.DS_Store
+coverage/
+src/generated/

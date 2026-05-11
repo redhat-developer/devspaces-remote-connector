@@ -1,0 +1,419 @@
+{
+  "name": "devspaces-connector",
+  "displayName": "Dev Spaces Connector",
+  "description": "Connect to Red Hat OpenShift Dev Spaces workspaces with zero configuration. Manage workspace lifecycle, authenticate via OpenShift OAuth, and establish remote development sessions — all from a single extension.",
+  "version": "0.6.0",
+  "publisher": "devspaces",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": ""
+  },
+  "engines": {
+    "node": ">=22.0.0",
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "Kubernetes",
+    "OpenShift",
+    "DevSpaces",
+    "remote development",
+    "cloud IDE"
+  ],
+  "activationEvents": [
+    "onView:devspacesWorkspaces",
+    "onCommand:devspaces.signIn",
+    "onResolveRemoteAuthority:devspaces"
+  ],
+  "main": "./dist/extension.js",
+  "extensionKind": [
+    "ui"
+  ],
+  "enabledApiProposals": [
+    "resolvers"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "devspaces-explorer",
+          "title": "Dev Spaces",
+          "icon": "images/devspaces-sidebar.svg"
+        }
+      ]
+    },
+    "views": {
+      "devspaces-explorer": [
+        {
+          "id": "devspacesWorkspaces",
+          "name": "Workspaces",
+          "when": "devspaces.authenticated && !devspaces.initializing && !remoteName"
+        },
+        {
+          "id": "devspacesInitializing",
+          "name": "Workspaces",
+          "when": "devspaces.authenticated && devspaces.initializing && !remoteName"
+        },
+        {
+          "id": "devspacesWelcome",
+          "name": "Welcome",
+          "when": "!devspaces.authenticated && !remoteName"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "devspacesWelcome",
+        "contents": "Connect to your Dev Spaces cluster to get started.\n[Sign In to Dev Spaces](command:devspaces.signIn)"
+      },
+      {
+        "view": "devspacesInitializing",
+        "contents": "$(loading~spin) Initializing your Dev Spaces environment...\n\nThis may take up to 2 minutes for first-time users while permissions are provisioned.\n\nPlease wait — workspace creation will be available shortly."
+      },
+      {
+        "view": "devspacesWorkspaces",
+        "contents": "No workspaces yet. Use the $(add) button above to create one."
+      }
+    ],
+    "commands": [
+      {
+        "command": "devspaces.signIn",
+        "title": "Sign In to Dev Spaces",
+        "category": "Dev Spaces",
+        "icon": "$(sign-in)"
+      },
+      {
+        "command": "devspaces.signOut",
+        "title": "Sign Out",
+        "category": "Dev Spaces",
+        "icon": "$(sign-out)"
+      },
+      {
+        "command": "devspaces.addCluster",
+        "title": "Add Cluster",
+        "category": "Dev Spaces",
+        "icon": "$(add)"
+      },
+      {
+        "command": "devspaces.refreshWorkspaces",
+        "title": "Refresh Workspaces",
+        "category": "Dev Spaces",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "devspaces.connectWorkspace",
+        "title": "Connect to Workspace",
+        "category": "Dev Spaces",
+        "icon": "$(remote-explorer)"
+      },
+      {
+        "command": "devspaces.startWorkspace",
+        "title": "Start Workspace",
+        "category": "Dev Spaces",
+        "icon": "$(play)"
+      },
+      {
+        "command": "devspaces.stopWorkspace",
+        "title": "Stop Workspace",
+        "category": "Dev Spaces",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "devspaces.restartWorkspace",
+        "title": "Restart Workspace",
+        "category": "Dev Spaces",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "devspaces.deleteWorkspace",
+        "title": "Delete Workspace",
+        "category": "Dev Spaces",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "devspaces.createWorkspace",
+        "title": "Create Workspace from Git URL",
+        "category": "Dev Spaces",
+        "icon": "$(repo-clone)"
+      },
+      {
+        "command": "devspaces.createEmptyWorkspace",
+        "title": "Create Empty Workspace",
+        "category": "Dev Spaces",
+        "icon": "$(file-add)"
+      },
+      {
+        "command": "devspaces.newWorkspace",
+        "title": "New Workspace",
+        "category": "Dev Spaces",
+        "icon": "$(add)"
+      },
+      {
+        "command": "devspaces.openInBrowser",
+        "title": "Open in Browser",
+        "category": "Dev Spaces",
+        "icon": "$(globe)"
+      },
+      {
+        "command": "devspaces.openInDashboard",
+        "title": "Open Dashboard",
+        "category": "Dev Spaces",
+        "icon": "$(dashboard)"
+      },
+      {
+        "command": "devspaces.restartFromLocalDevfile",
+        "title": "Restart Workspace from Local Devfile",
+        "category": "Dev Spaces",
+        "enablement": "devspaces.isRemoteSession"
+      },
+      {
+        "command": "devspaces.connectRecent",
+        "title": "Connect to Recent Workspace",
+        "category": "Dev Spaces"
+      },
+      {
+        "command": "devspaces.disconnect",
+        "title": "Disconnect",
+        "category": "Dev Spaces",
+        "icon": "$(debug-disconnect)"
+      },
+      {
+        "command": "devspaces.removeCluster",
+        "title": "Remove Cluster",
+        "category": "Dev Spaces",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "devspaces.clearAuth",
+        "title": "Clear All Authentication",
+        "category": "Dev Spaces",
+        "icon": "$(clear-all)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "devspaces.newWorkspace",
+          "when": "view == devspacesWorkspaces && !devspaces.initializing",
+          "group": "navigation@1"
+        },
+        {
+          "command": "devspaces.refreshWorkspaces",
+          "when": "view == devspacesWorkspaces",
+          "group": "navigation@2"
+        },
+        {
+          "command": "devspaces.createWorkspace",
+          "when": "view == devspacesWorkspaces && !devspaces.initializing",
+          "group": "create@1"
+        },
+        {
+          "command": "devspaces.createEmptyWorkspace",
+          "when": "view == devspacesWorkspaces && !devspaces.initializing",
+          "group": "create@2"
+        },
+        {
+          "command": "devspaces.clearAuth",
+          "when": "view == devspacesWorkspaces",
+          "group": "auth@1"
+        },
+        {
+          "command": "devspaces.openInDashboard",
+          "when": "view == devspacesWorkspaces",
+          "group": "auth@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "devspaces.connectWorkspace",
+          "when": "viewItem == workspace-running",
+          "group": "inline@1"
+        },
+        {
+          "command": "devspaces.startWorkspace",
+          "when": "viewItem == workspace-stopped",
+          "group": "inline@1"
+        },
+        {
+          "command": "devspaces.stopWorkspace",
+          "when": "viewItem == workspace-running",
+          "group": "inline@2"
+        },
+        {
+          "command": "devspaces.deleteWorkspace",
+          "when": "viewItem =~ /^workspace-/",
+          "group": "workspace@3"
+        },
+        {
+          "command": "devspaces.restartWorkspace",
+          "when": "viewItem == workspace-running || viewItem == workspace-failed",
+          "group": "workspace@1"
+        },
+        {
+          "command": "devspaces.openInBrowser",
+          "when": "viewItem == workspace-running",
+          "group": "workspace@2"
+        },
+        {
+          "command": "devspaces.removeCluster",
+          "when": "viewItem == cluster",
+          "group": "cluster@1"
+        },
+        {
+          "command": "devspaces.newWorkspace",
+          "when": "viewItem == cluster",
+          "group": "cluster@2"
+        },
+        {
+          "command": "devspaces.clearAuth",
+          "when": "viewItem == cluster",
+          "group": "cluster@3"
+        }
+      ]
+    },
+    "resourceLabelFormatters": [
+      {
+        "scheme": "vscode-remote",
+        "authority": "devspaces+*",
+        "formatting": {
+          "label": "${path}",
+          "separator": "/",
+          "tildify": true,
+          "workspaceSuffix": "DevSpaces"
+        }
+      }
+    ],
+    "configuration": {
+      "title": "Dev Spaces Connector",
+      "properties": {
+        "devspaces.autoConnect": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically connect to the last used workspace on startup."
+        },
+        "devspaces.autoOpenFolder": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically open the project folder after connecting."
+        },
+        "devspaces.clusters": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "List of Dev Spaces cluster URLs. The first entry is used as the default cluster."
+        },
+        "devspaces.kiroCopyCredentials": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Copy Kiro IDE authentication credentials to the workspace pod on connect.",
+          "when": "devspaces.isKiroIDE"
+        },
+        "devspaces.rehDownloadUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Custom URL template for downloading the Remote Extension Host (REH) server binary. Format: `https://your-host/path/${commit}/kiro-reh-${os}-${arch}.tar.gz`. If empty, uses the `serverDownloadUrlTemplate` from the IDE's built-in product.json."
+        },
+        "devspaces.connectionTimeout": {
+          "type": "number",
+          "default": 300,
+          "description": "Maximum time in seconds to wait for a workspace to start."
+        },
+        "devspaces.reconnect.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically attempt to reconnect when connection is lost."
+        },
+        "devspaces.reconnect.maxRetries": {
+          "type": "number",
+          "default": 5,
+          "description": "Maximum number of reconnection attempts."
+        },
+        "devspaces.logLevel": {
+          "type": "string",
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ],
+          "default": "info",
+          "description": "Logging verbosity level."
+        },
+        "devspaces.openBehavior": {
+          "type": "string",
+          "enum": [
+            "newWindow",
+            "currentWindow",
+            "prompt"
+          ],
+          "enumDescriptions": [
+            "Always open the workspace in a new window",
+            "Always open the workspace in the current window",
+            "Ask each time whether to open in a new or current window"
+          ],
+          "default": "newWindow",
+          "description": "Controls how a remote workspace session is opened when connecting."
+        },
+        "devspaces.hideRemoteExplorer": {
+          "type": "boolean",
+          "default": true,
+          "description": "Hide the Remote-SSH explorer sidebar. Users should use the Dev Spaces sidebar instead."
+        },
+        "devspaces.initialization.roleBindingName": {
+          "type": "string",
+          "default": "devspaces-user-container-build",
+          "description": "Name of the RoleBinding to wait for during namespace initialization. Change this for testing."
+        },
+        "devspaces.initialization.timeout": {
+          "type": "number",
+          "default": 120,
+          "description": "Maximum time in seconds to wait for namespace initialization."
+        },
+        "devspaces.initialization.pollInterval": {
+          "type": "number",
+          "default": 2,
+          "description": "Poll interval in seconds when checking for namespace readiness."
+        },
+        "devspaces.initialization.namespaceAgeThreshold": {
+          "type": "number",
+          "default": 300,
+          "description": "Namespace age threshold in seconds. Namespaces newer than this trigger the initialization check."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "prebuild": "node scripts/fetch-ca-bundle.js",
+    "compile": "node scripts/fetch-ca-bundle.js && webpack",
+    "watch": "webpack --watch",
+    "package": "node scripts/fetch-ca-bundle.js && webpack --mode production --devtool hidden-source-map",
+    "lint": "eslint src",
+    "test": "jest",
+    "vsix": "vsce package && mv devspaces-connector-*.vsix devspaces-connector-$(node -p \"require('./package.json').version\").vsix",
+    "vsix:all": "npm run vsix"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.11",
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@types/ws": "^8.5.10",
+    "@typescript-eslint/eslint-plugin": "^8.59.2",
+    "@typescript-eslint/parser": "^8.59.2",
+    "@vscode/vsce": "^3.0.0",
+    "eslint": "^10.3.0",
+    "jest": "^29.7.0",
+    "jest-junit": "^17.0.0",
+    "ts-jest": "^29.1.1",
+    "ts-loader": "^9.5.1",
+    "typescript": "^5.5.0",
+    "webpack": "^5.95.0",
+    "webpack-cli": "^5.1.4"
+  },
+  "dependencies": {
+    "@kubernetes/client-node": "^1.0.0"
+  }
+}
