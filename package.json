@@ -28,7 +28,7 @@
     "onCommand:devspaces.signIn",
     "onResolveRemoteAuthority:devspaces"
   ],
-  "main": "./dist/extension.js",
+  "main": "./out/extension.js",
   "extensionKind": [
     "ui"
   ],
@@ -461,8 +461,11 @@
   "scripts": {
     "vscode:prepublish": "npm run package",
     "prebuild": "node scripts/fetch-ca-bundle.js",
-    "compile": "node scripts/fetch-ca-bundle.js && webpack",
-    "watch": "webpack --watch",
+    "clean": "rm -rf out dist",
+    "compile": "npm run clean && node scripts/fetch-ca-bundle.js && tsc -p ./",
+    "compile:webpack": "npm run clean && node scripts/fetch-ca-bundle.js && webpack",
+    "watch": "npm run clean && tsc -p ./ --watch",
+    "watch:webpack": "npm run clean && webpack --watch",
     "package": "node scripts/fetch-ca-bundle.js && webpack --mode production --devtool hidden-source-map",
     "lint": "eslint src --max-warnings 0",
     "lint:dead": "knip",

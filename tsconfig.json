@@ -15,5 +15,5 @@
     "declarationMap": true,
     "types": ["jest", "node"]
   },
-  "exclude": ["node_modules", ".vscode-test", "dist", "**/*.test.ts", "knip.config.ts"]
+  "exclude": ["node_modules", ".vscode-test", "dist", "out", "**/*.test.ts", "knip.config.ts"]
 }

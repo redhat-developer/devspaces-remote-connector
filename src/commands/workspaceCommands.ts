@@ -273,7 +273,9 @@ export function registerWorkspaceCommands(ctx: WorkspaceCommandContext): void {
             progress.report({ message: '(5/5) Opening remote session...' });
             const openBehavior = vscode.workspace.getConfiguration('devspaces').get<string>('openBehavior', 'newWindow');
             let forceNewWindow: boolean;
-            if (openBehavior === 'prompt') {
+            if (process.env.DEVSPACES_DEBUG) {
+              forceNewWindow = false;
+            } else if (openBehavior === 'prompt') {
               const windowChoice = await vscode.window.showQuickPick(
                 [{ label: '$(empty-window) New Window', value: true }, { label: '$(window) Current Window', value: false }],
                 { placeHolder: `Open ${workspace.displayName} workspace`, ignoreFocusOut: true }
