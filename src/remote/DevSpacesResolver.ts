@@ -1,12 +1,15 @@
 import * as vscode from 'vscode';
 import * as net from 'net';
 import * as crypto from 'crypto';
-import * as stream from 'stream';
 import * as k8s from '@kubernetes/client-node';
 import { Logger } from '../util/Logger';
 import { getServerConfig } from './ServerConfig';
 import { installServerViaExec } from './ServerSetup';
-import { DEVSPACES_AUTHORITY } from '../constants';
+import { WorkspaceStatusMonitor } from './WorkspaceStatusMonitor';
+import { DEVSPACES_AUTHORITY, DW_API_GROUP, DW_API_VERSION, DW_PLURAL, STATE_CONNECTIONS_MAP, STATE_ACTIVE_CONNECTION, PROJECTS_ROOT } from '../constants';
+import { parseHostAlias } from '../util/workspaceNameExtractor';
+import { NamespaceApi } from '../kubernetes/NamespaceApi';
+import { getJson } from '../util/httpClient';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -18,22 +21,18 @@ export interface WorkspaceConnectionInfo {
   clusterUrl: string;
 }
 
-type WorkspacePhase = 'Running' | 'Starting' | 'Stopping' | 'Stopped' | 'Failed' | 'Unknown';
-
 // ─── Resolver ────────────────────────────────────────────────────────────────
 
 /**
  * RemoteAuthorityResolver for DevSpaces workspaces.
  *
- * Uses ResolvedAuthority (TCP host:port) with an aggressive status monitor
- * that detects pod death and auto-reloads the window before Kiro's internal
- * reconnection logic shows the "Cannot reconnect" dialog.
+ * Resolves a remote authority to a TCP host:port by:
+ * 1. Looking up connection info for the workspace
+ * 2. Authenticating and discovering the pod
+ * 3. Installing the REH server on the pod
+ * 4. Port-forwarding to the server
  *
- * Reconnection strategy:
- * - Status monitor polls pod health every 5 seconds
- * - On pod death: waits for new pod → auto-reloads window
- * - On workspace stopped: shows restart/close dialog
- * - Result: user sees one clean reload, no ugly dialogs
+ * Delegates pod health monitoring to WorkspaceStatusMonitor.
  */
 export class DevSpacesResolver implements vscode.RemoteAuthorityResolver, vscode.Disposable {
   private logger = Logger.getInstance();
@@ -41,17 +40,15 @@ export class DevSpacesResolver implements vscode.RemoteAuthorityResolver, vscode
   private kubeConfig: k8s.KubeConfig | undefined;
   private activeConnectionInfo: WorkspaceConnectionInfo | undefined;
   private portForwardServer: net.Server | undefined;
-  private statusPoller: ReturnType<typeof setInterval> | undefined;
-  private lastResolvedPodName: string | undefined;
-  private isHandlingPodDeath = false;
+  private statusMonitor: WorkspaceStatusMonitor | undefined;
   private stableConnectionToken: string | undefined;
 
   constructor(
     private context: vscode.ExtensionContext,
     private getConnectionInfo: (hostAlias: string) => Promise<WorkspaceConnectionInfo | undefined>,
-    private getKubeConfig: (clusterUrl: string) => Promise<k8s.KubeConfig | undefined>,
+    private getKubeConfig: (clusterUrl: string, extraKeys?: string[]) => Promise<k8s.KubeConfig | undefined>,
     private findWorkspacePod: (kubeConfig: k8s.KubeConfig, namespace: string, devworkspaceId: string) => Promise<{ podName: string; containerName: string }>,
-    private checkAndStartWorkspace: (clusterUrl: string, namespace: string, workspaceName: string) => Promise<'running' | 'started' | 'failed'>
+    private checkAndStartWorkspace: (clusterUrl: string, namespace: string, workspaceName: string, extraKeys?: string[]) => Promise<'running' | 'started' | 'failed' | 'auth_failed' | 'not_found'>
   ) {}
 
   // ─── Public API ──────────────────────────────────────────────────────────
@@ -93,7 +90,8 @@ export class DevSpacesResolver implements vscode.RemoteAuthorityResolver, vscode
   }
 
   dispose(): void {
-    this.stopStatusMonitor();
+    this.statusMonitor?.dispose();
+    this.statusMonitor = undefined;
     this.portForwardServer?.close();
     this.portForwardServer = undefined;
     this.labelFormatter?.dispose();
@@ -105,12 +103,48 @@ export class DevSpacesResolver implements vscode.RemoteAuthorityResolver, vscode
   private async doResolve(hostAlias: string): Promise<vscode.ResolverResult> {
     const connInfo = await this.resolveConnectionInfo(hostAlias);
     await this.resolveKubeConfig(connInfo);
+
+    // Extract cluster ID for token lookup fallback
+    const extraKeys: string[] = [];
+    const atIdx = connInfo.hostAlias.indexOf('@');
+    if (atIdx !== -1) {
+      extraKeys.push(connInfo.hostAlias.slice(atIdx + 1));
+    }
+
+    // Discover namespace if missing (e.g. opening from recent after auth was cleared)
+    if (!connInfo.namespace) {
+      await this.discoverNamespace(connInfo);
+    }
+
+    // Discover devworkspaceId if missing
+    if (!connInfo.devworkspaceId && connInfo.namespace && connInfo.workspaceName) {
+      await this.discoverDevworkspaceId(connInfo);
+    }
+
+    // Ensure workspace is running (handles cold start after IDE reopen)
+    const wsStatus = await this.checkAndStartWorkspace(connInfo.clusterUrl, connInfo.namespace, connInfo.workspaceName, extraKeys);
+    if (wsStatus === 'not_found') {
+      await this.showWorkspaceDeletedDialog(connInfo);
+      throw vscode.RemoteAuthorityResolverError.NotAvailable(
+        `Workspace "${connInfo.workspaceName}" no longer exists. It may have been deleted.`
+      );
+    } else if (wsStatus === 'auth_failed') {
+      this.logger.info('Token expired, triggering browser sign-in...');
+      await vscode.authentication.getSession('openshift-devspaces', [], { forceNewSession: true });
+      await this.resolveKubeConfig(connInfo);
+      const retryStatus = await this.checkAndStartWorkspace(connInfo.clusterUrl, connInfo.namespace, connInfo.workspaceName, extraKeys);
+      if (retryStatus === 'failed' || retryStatus === 'auth_failed') {
+        throw new Error(`Workspace ${connInfo.workspaceName} failed to start.`);
+      }
+    } else if (wsStatus === 'failed') {
+      throw new Error(`Workspace ${connInfo.workspaceName} failed to start.`);
+    }
+
     const { podName, containerName } = await this.discoverPod(connInfo);
     const { listeningOn, connectionToken } = await this.installREH(connInfo, podName, containerName);
     const localPort = await this.establishPortForward(connInfo.namespace, podName, listeningOn);
     this.registerLabelFormatter(hostAlias);
-    this.lastResolvedPodName = podName;
-    this.startStatusMonitor(connInfo);
+    this.startStatusMonitor(connInfo, podName);
 
     return new vscode.ResolvedAuthority('127.0.0.1', localPort, connectionToken);
   }
@@ -127,11 +161,80 @@ export class DevSpacesResolver implements vscode.RemoteAuthorityResolver, vscode
   }
 
   private async resolveKubeConfig(connInfo: WorkspaceConnectionInfo): Promise<void> {
-    const kc = await this.getKubeConfig(connInfo.clusterUrl);
+    // Extract cluster ID from hostAlias (format: workspaceName@clusterId) to use as extra token lookup key.
+    // This handles the case where devSpacesUrl was updated to a CNAME (e.g. devspaces.example.com)
+    // but the token was stored under the original cluster ID or apps domain.
+    const extraKeys: string[] = [];
+    const atIdx = connInfo.hostAlias.indexOf('@');
+    if (atIdx !== -1) {
+      extraKeys.push(connInfo.hostAlias.slice(atIdx + 1));
+    }
+
+    let kc = await this.getKubeConfig(connInfo.clusterUrl, extraKeys);
     if (!kc) {
-      throw new Error('Not authenticated. Please sign in first.');
+      this.logger.info('No valid token, triggering sign-in...');
+      try {
+        await vscode.authentication.getSession('openshift-devspaces', [], { createIfNone: true });
+        kc = await this.getKubeConfig(connInfo.clusterUrl, extraKeys);
+      } catch (err) {
+        this.logger.error(`Auto sign-in failed: ${err}`);
+      }
+    }
+    if (!kc) {
+      throw new Error('Not authenticated. Please sign in via the Dev Spaces sidebar.');
     }
     this.kubeConfig = kc;
+  }
+
+  private async discoverNamespace(connInfo: WorkspaceConnectionInfo): Promise<void> {
+    this.logger.info('Namespace missing, discovering...');
+    const kc = this.kubeConfig!;
+    const server = kc.getCurrentCluster()?.server ?? '';
+    const user = kc.getCurrentUser();
+    const token = user?.token ?? '';
+
+    // Get username from OpenShift API
+    try {
+      const userInfo = await getJson<{ metadata?: { name?: string } }>(
+        `${server}/apis/user.openshift.io/v1/users/~`,
+        { Authorization: `Bearer ${token}` }
+      );
+      const username = userInfo.metadata?.name;
+      if (!username) { throw new Error('Could not determine username'); }
+
+      const coreApi = kc.makeApiClient(k8s.CoreV1Api);
+      const namespaceApi = new NamespaceApi(coreApi);
+      const ns = await namespaceApi.findUserNamespace(username);
+      if (ns) {
+        connInfo.namespace = ns;
+        this.logger.info(`Namespace discovered: ${ns}`);
+      } else {
+        throw new Error(`No namespace found for user ${username}`);
+      }
+    } catch (err) {
+      throw new Error(`Failed to discover namespace: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  private async discoverDevworkspaceId(connInfo: WorkspaceConnectionInfo): Promise<void> {
+    this.logger.debug(`Discovering devworkspaceId for ${connInfo.workspaceName} in ${connInfo.namespace}`);
+    try {
+      const customApi = this.kubeConfig!.makeApiClient(k8s.CustomObjectsApi);
+      const dw = await customApi.getNamespacedCustomObject({
+        group: DW_API_GROUP,
+        version: DW_API_VERSION,
+        namespace: connInfo.namespace,
+        plural: DW_PLURAL,
+        name: connInfo.workspaceName,
+      }) as any;
+      const id = dw?.status?.devworkspaceId ?? dw?.metadata?.uid ?? '';
+      if (id) {
+        connInfo.devworkspaceId = id;
+        this.logger.debug(`DevWorkspace ID discovered: ${id}`);
+      }
+    } catch (err) {
+      this.logger.debug(`Could not discover devworkspaceId: ${err instanceof Error ? err.message : err}`);
+    }
   }
 
   private async discoverPod(connInfo: WorkspaceConnectionInfo): Promise<{ podName: string; containerName: string }> {
@@ -160,7 +263,7 @@ export class DevSpacesResolver implements vscode.RemoteAuthorityResolver, vscode
     this.logger.info(`Installing REH on ${podName}/${containerName}`);
     const serverConfig = await getServerConfig();
     const connectionToken = crypto.randomUUID();
-    this.stableConnectionToken = connectionToken; // Store for pod restarts
+    this.stableConnectionToken = connectionToken;
     const result = await installServerViaExec(
       this.kubeConfig!, connInfo.namespace, podName, containerName, serverConfig, connectionToken
     );
@@ -174,7 +277,7 @@ export class DevSpacesResolver implements vscode.RemoteAuthorityResolver, vscode
 
     const forward = new k8s.PortForward(this.kubeConfig!);
     const server = net.createServer((socket) => {
-      forward.portForward(namespace, podName, [remotePort], socket, null, socket);
+      void forward.portForward(namespace, podName, [remotePort], socket, null, socket);
     });
 
     const localPort = await new Promise<number>((resolve, reject) => {
@@ -189,362 +292,140 @@ export class DevSpacesResolver implements vscode.RemoteAuthorityResolver, vscode
 
   private registerLabelFormatter(hostAlias: string): void {
     this.labelFormatter?.dispose();
+    const parsed = parseHostAlias(hostAlias);
+    let suffix: string;
+    if (parsed) {
+      const clusters = this.context.globalState.get<any[]>('devspaces.clusters', []);
+      suffix = clusters.length > 1 ? `${parsed.workspaceName}@${parsed.clusterId}` : parsed.workspaceName;
+    } else {
+      suffix = hostAlias;
+    }
     this.labelFormatter = vscode.workspace.registerResourceLabelFormatter({
       scheme: 'vscode-remote',
-      authority: `${DEVSPACES_AUTHORITY}+*`,
+      authority: `${DEVSPACES_AUTHORITY}+${hostAlias}`,
       formatting: {
         label: '${path}',
         separator: '/',
         tildify: true,
-        workspaceSuffix: `DevSpaces: ${hostAlias.replace('devspaces-', '')}`,
+        workspaceSuffix: suffix,
       },
     });
     vscode.commands.executeCommand('setContext', 'forwardedPortsViewEnabled', true);
+  }
+
+  // ─── Status Monitor ──────────────────────────────────────────────────────
+
+  private startStatusMonitor(connInfo: WorkspaceConnectionInfo, podName: string): void {
+    this.statusMonitor?.dispose();
+    this.statusMonitor = new WorkspaceStatusMonitor(
+      {
+        getKubeConfig: this.getKubeConfig,
+        findWorkspacePod: this.findWorkspacePod,
+        checkAndStartWorkspace: this.checkAndStartWorkspace,
+      },
+      this.kubeConfig!,
+      podName,
+      this.stableConnectionToken
+    );
+    this.statusMonitor.start(connInfo);
   }
 
   // ─── Error Handling ──────────────────────────────────────────────────────
 
   private async handleResolveError(e: unknown): Promise<never> {
     this.logger.error(`Resolve error: ${e}`);
-    this.stopStatusMonitor();
+    this.statusMonitor?.stop();
 
     if (e instanceof vscode.RemoteAuthorityResolverError) { throw e; }
 
     const connInfo = this.activeConnectionInfo;
-    const phase = await this.queryWorkspacePhase(connInfo);
+    if (!connInfo) {
+      throw vscode.RemoteAuthorityResolverError.NotAvailable(
+        e instanceof Error ? e.message : String(e)
+      );
+    }
+
+    // Create a temporary monitor to query phase
+    const monitor = new WorkspaceStatusMonitor(
+      { getKubeConfig: this.getKubeConfig, findWorkspacePod: this.findWorkspacePod, checkAndStartWorkspace: this.checkAndStartWorkspace },
+      this.kubeConfig ?? new k8s.KubeConfig(),
+      '',
+      undefined
+    );
+
+    const phase = await monitor.queryWorkspacePhase(connInfo);
     this.logger.info(`Phase: ${phase}`);
 
     switch (phase) {
       case 'Running':
-      case 'Starting':
-        // Workspace is alive — wait for pod to be fully ready before retrying
-        this.logger.info(`Workspace is ${phase}, waiting for pod to be ready...`);
-        if (connInfo) {
-          await this.waitForPodReady(connInfo, 120_000);
-        }
+        this.logger.info('Workspace is Running, waiting for pod to be ready...');
+        await monitor.waitForPodReady(connInfo, 120_000);
         return this.retryTemporarily('Reconnecting to workspace...');
+      case 'Starting': {
+        this.logger.info('Workspace Starting, waiting for Running...');
+        const reached = await monitor.waitForPhase(connInfo, 'Running', 300_000);
+        if (reached) {
+          await monitor.waitForPodReady(connInfo, 120_000);
+          return this.retryTemporarily('Reconnecting to workspace...');
+        }
+        return this.handleStoppedPhase(e);
+      }
       case 'Stopping':
         return this.retryTemporarily('Workspace is stopping...');
+      case 'NotFound':
+        await this.showWorkspaceDeletedDialog(connInfo);
+        throw vscode.RemoteAuthorityResolverError.NotAvailable(
+          `Workspace "${connInfo.workspaceName}" no longer exists. It may have been deleted.`
+        );
       default:
-        return this.handleStoppedPhase(connInfo, e);
+        return this.handleStoppedPhase(e);
     }
   }
 
-  private async handleStartingPhase(connInfo: WorkspaceConnectionInfo | undefined, originalError: unknown): Promise<never> {
-    this.logger.info('Workspace Starting, waiting for Running...');
-    const reached = await this.waitForPhase(connInfo, 'Running', 300_000);
-    if (reached && connInfo) {
-      await this.waitForPodReady(connInfo, 120_000);
-      return this.retryTemporarily('Reconnecting to workspace...');
-    }
-    return this.handleStoppedPhase(connInfo, originalError);
-  }
-
-  private async handleStoppedPhase(connInfo: WorkspaceConnectionInfo | undefined, originalError: unknown): Promise<never> {
-    await this.showWorkspaceStoppedDialog(connInfo, originalError);
+  private handleStoppedPhase(originalError: unknown): never {
     throw vscode.RemoteAuthorityResolverError.NotAvailable(
       originalError instanceof Error ? originalError.message : String(originalError)
     );
   }
 
-  private retryTemporarily(message: string): never {
-    throw vscode.RemoteAuthorityResolverError.TemporarilyNotAvailable(message);
-  }
-
-  // ─── Status Monitor (Pod Health + Auto-Reload) ───────────────────────────
-
-  /**
-   * Polls pod health every 5 seconds. When the pod dies:
-   * 1. Waits for DevWorkspace phase to reach "Running"
-   * 2. Waits for NEW pod (different name from lastResolvedPodName)
-   * 3. Pre-installs server on new pod with stable connection token
-   * 4. Auto-reloads the window
-   *
-   * This beats Kiro's internal reconnection timeout (~15-20s) so the user
-   * sees a clean reload instead of the "Cannot reconnect" dialog.
-   * The pre-install ensures resolve() finds the server already running.
-   */
-  private startStatusMonitor(connInfo: WorkspaceConnectionInfo): void {
-    this.stopStatusMonitor();
-
-    this.statusPoller = setInterval(async () => {
-      if (this.isHandlingPodDeath) { return; }
-
-      try {
-        // Check workspace phase first
-        const phase = await this.queryWorkspacePhase(connInfo);
-
-        if (phase === 'Stopped' || phase === 'Failed') {
-          this.stopStatusMonitor();
-          this.portForwardServer?.close();
-          this.portForwardServer = undefined;
-          await this.showWorkspaceStoppedDialog(connInfo, new Error(`Workspace was ${phase.toLowerCase()}`));
-          return;
-        }
-
-        // Check if the pod is still alive (fast check)
-        try {
-          const { podName } = await this.findWorkspacePod(this.kubeConfig!, connInfo.namespace, connInfo.devworkspaceId);
-          if (this.lastResolvedPodName && podName !== this.lastResolvedPodName) {
-            // Pod changed! Pre-install server before reload
-            this.isHandlingPodDeath = true;
-            this.logger.info(`Pod changed: ${this.lastResolvedPodName} → ${podName}. Pre-installing server...`);
-            await this.handlePodDeath(connInfo, podName);
-          }
-        } catch {
-          // Pod not found — it's being rescheduled
-          this.isHandlingPodDeath = true;
-          this.logger.info('Pod not found, waiting for new pod before reloading...');
-          await this.handlePodNotFound(connInfo);
-        }
-      } catch (err) {
-        this.logger.debug(`Status poll error: ${err}`);
-      }
-    }, 5_000);
-  }
-
-  /**
-   * Handle pod death when a new pod is detected.
-   * Pre-installs server on new pod before reloading.
-   */
-  private async handlePodDeath(
-    connInfo: WorkspaceConnectionInfo,
-    _newPodName: string
-  ): Promise<void> {
-    try {
-      // Wait for DevWorkspace phase to reach "Running"
-      this.logger.info('Waiting for DevWorkspace phase to reach Running...');
-      const phaseReached = await this.waitForPhase(connInfo, 'Running', 300_000);
-      if (!phaseReached) {
-        this.logger.warn('DevWorkspace did not reach Running phase');
-        this.stopStatusMonitor();
-        await this.showWorkspaceStoppedDialog(connInfo, new Error('Workspace failed to reach Running phase'));
-        return;
-      }
-
-      // Wait for new pod to be fully ready (containers initialized)
-      this.logger.info('Waiting for new pod to be ready...');
-      const { podName: actualNewPodName, containerName } = await this.waitForNewPod(connInfo, 120_000);
-
-      // Pre-install server on new pod with stable token
-      this.logger.info(`Pre-installing server on ${actualNewPodName}/${containerName}...`);
-      const serverConfig = await getServerConfig();
-      // Use stable token from initial resolve
-      const token = this.stableConnectionToken || crypto.randomUUID();
-      await installServerViaExec(
-        this.kubeConfig!, connInfo.namespace, actualNewPodName, containerName, serverConfig, token
-      );
-
-      this.logger.info('Server pre-installed, reloading window...');
-      this.stopStatusMonitor();
-      await vscode.commands.executeCommand('workbench.action.reloadWindow');
-    } catch (err) {
-      this.logger.error(`handlePodDeath failed: ${err}`);
-      this.isHandlingPodDeath = false;
-    }
-  }
-
-  /**
-   * Handle pod not found (pod is being rescheduled).
-   * Waits for new pod and pre-installs server before reloading.
-   */
-  private async handlePodNotFound(
-    connInfo: WorkspaceConnectionInfo
-  ): Promise<void> {
-    try {
-      // Wait for DevWorkspace phase to reach "Running"
-      this.logger.info('Waiting for DevWorkspace phase to reach Running...');
-      const phaseReached = await this.waitForPhase(connInfo, 'Running', 300_000);
-      if (!phaseReached) {
-        this.logger.warn('DevWorkspace did not reach Running phase');
-        this.stopStatusMonitor();
-        await this.showWorkspaceStoppedDialog(connInfo, new Error('Workspace failed to reach Running phase'));
-        return;
-      }
-
-      // Wait for new pod to be fully ready
-      this.logger.info('Waiting for new pod to be ready...');
-      const { podName, containerName } = await this.waitForNewPod(connInfo, 120_000);
-
-      // Pre-install server on new pod with stable token
-      this.logger.info(`Pre-installing server on ${podName}/${containerName}...`);
-      const serverConfig = await getServerConfig();
-      const token = this.stableConnectionToken || crypto.randomUUID();
-      await installServerViaExec(
-        this.kubeConfig!, connInfo.namespace, podName, containerName, serverConfig, token
-      );
-
-      this.logger.info('Server pre-installed, reloading window...');
-      this.stopStatusMonitor();
-      await vscode.commands.executeCommand('workbench.action.reloadWindow');
-    } catch (err) {
-      this.logger.error(`handlePodNotFound failed: ${err}`);
-      this.isHandlingPodDeath = false;
-    }
-  }
-
-  private stopStatusMonitor(): void {
-    if (this.statusPoller) {
-      clearInterval(this.statusPoller);
-      this.statusPoller = undefined;
-    }
-  }
-
-  // ─── Workspace Phase Queries ─────────────────────────────────────────────
-
-  private async queryWorkspacePhase(connInfo: WorkspaceConnectionInfo | undefined): Promise<WorkspacePhase> {
-    if (!connInfo) { return 'Unknown'; }
-    try {
-      const kc = await this.getKubeConfig(connInfo.clusterUrl);
-      if (!kc) { return 'Unknown'; }
-
-      const customApi = kc.makeApiClient(k8s.CustomObjectsApi);
-      const dw = await customApi.getNamespacedCustomObject({
-        group: 'workspace.devfile.io',
-        version: 'v1alpha2',
-        namespace: connInfo.namespace,
-        plural: 'devworkspaces',
-        name: connInfo.workspaceName,
-      }) as any;
-
-      const phase = dw?.status?.phase;
-      if (phase === 'Failing') { return 'Failed'; }
-      const valid: WorkspacePhase[] = ['Running', 'Starting', 'Stopping', 'Stopped', 'Failed'];
-      return valid.includes(phase) ? phase : 'Unknown';
-    } catch (err) {
-      this.logger.error(`queryWorkspacePhase failed: ${err}`);
-      return 'Unknown';
-    }
-  }
-
-  private async waitForPhase(
-    connInfo: WorkspaceConnectionInfo | undefined,
-    targetPhase: WorkspacePhase,
-    timeoutMs: number
-  ): Promise<boolean> {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      await this.sleep(3000);
-      const current = await this.queryWorkspacePhase(connInfo);
-      if (current === targetPhase) { return true; }
-      if (current === 'Failed' || current === 'Stopped') { return false; }
-    }
-    return false;
-  }
-
-  private async waitForPodReady(connInfo: WorkspaceConnectionInfo, timeoutMs: number): Promise<void> {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      try {
-        const kc = this.kubeConfig ?? await this.getKubeConfig(connInfo.clusterUrl);
-        if (kc) {
-          this.kubeConfig = kc;
-          const { podName, containerName } = await this.findWorkspacePod(kc, connInfo.namespace, connInfo.devworkspaceId);
-
-          // Verify the pod can actually accept exec commands (containers ready)
-          const exec = new k8s.Exec(kc);
-          await new Promise<void>((resolve, reject) => {
-            const stdout = new stream.Writable({ write(_c: any, _e: any, cb: any) { cb(); } });
-            exec.exec(connInfo.namespace, podName, containerName, ['echo', 'ready'], stdout, stdout, null, false,
-              (status: any) => {
-                if (status?.status === 'Success') { resolve(); }
-                else { reject(new Error('exec failed')); }
-              }
-            ).catch(reject);
-          });
-
-          return; // Pod is truly ready
-        }
-      } catch { /* not ready yet */ }
-      await this.sleep(3000);
-    }
-    this.logger.warn(`Pod not ready after ${timeoutMs / 1000}s`);
-  }
-
-  /**
-   * Wait for a NEW pod (different from lastResolvedPodName) to be ready.
-   * Returns the pod name and container name when found and ready.
-   */
-  private async waitForNewPod(
-    connInfo: WorkspaceConnectionInfo,
-    timeoutMs: number
-  ): Promise<{ podName: string; containerName: string }> {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      try {
-        const kc = this.kubeConfig ?? await this.getKubeConfig(connInfo.clusterUrl);
-        if (kc) {
-          this.kubeConfig = kc;
-          const result = await this.findWorkspacePod(kc, connInfo.namespace, connInfo.devworkspaceId);
-
-          // Must be a DIFFERENT pod than the one that died
-          if (result.podName === this.lastResolvedPodName) {
-            this.logger.debug(`Still on old pod ${result.podName}, waiting for new one...`);
-            await this.sleep(3000);
-            continue;
-          }
-
-          // Verify the pod can actually accept exec commands (containers ready)
-          const exec = new k8s.Exec(kc);
-          await new Promise<void>((resolve, reject) => {
-            const stdout = new stream.Writable({ write(_c: any, _e: any, cb: any) { cb(); } });
-            exec.exec(connInfo.namespace, result.podName, result.containerName, ['echo', 'ready'], stdout, stdout, null, false,
-              (status: any) => {
-                if (status?.status === 'Success') { resolve(); }
-                else { reject(new Error('exec failed')); }
-              }
-            ).catch(reject);
-          });
-
-          return result; // New pod is truly ready
-        }
-      } catch { /* not ready yet */ }
-      await this.sleep(3000);
-    }
-    throw new Error(`New pod not ready after ${timeoutMs / 1000}s`);
-  }
-
-  // ─── Workspace Stopped Dialog ────────────────────────────────────────────
-
-  private async showWorkspaceStoppedDialog(
-    connInfo: WorkspaceConnectionInfo | undefined,
-    _originalError: unknown
-  ): Promise<void> {
+  private async showWorkspaceDeletedDialog(connInfo: WorkspaceConnectionInfo): Promise<void> {
     this.logger.show();
-    const choice = await vscode.window.showErrorMessage(
-      'Your workspace is not running.',
+
+    // Remove stale connection info from globalState
+    const connectionsMap = this.context.globalState.get<Record<string, any>>(STATE_CONNECTIONS_MAP, {});
+    if (connectionsMap[connInfo.hostAlias]) {
+      delete connectionsMap[connInfo.hostAlias];
+      await this.context.globalState.update(STATE_CONNECTIONS_MAP, connectionsMap);
+    }
+    // Clear active connection if it matches
+    const active = this.context.globalState.get<any>(STATE_ACTIVE_CONNECTION);
+    if (active?.hostAlias === connInfo.hostAlias) {
+      await this.context.globalState.update(STATE_ACTIVE_CONNECTION, undefined);
+    }
+
+    await vscode.window.showErrorMessage(
+      `Workspace "${connInfo.workspaceName}" no longer exists. It may have been deleted from the cluster.`,
       { modal: true },
-      'Restart Workspace',
-      'Close Remote'
+      'Close Remote',
     );
 
-    if (choice === 'Restart Workspace' && connInfo) {
-      await this.restartAndReload(connInfo);
-    } else {
-      await vscode.commands.executeCommand('workbench.action.remote.close');
+    // Remove from VS Code's recently opened list
+    try {
+      const remoteUri = vscode.Uri.parse(
+        `vscode-remote://${DEVSPACES_AUTHORITY}+${connInfo.hostAlias}${PROJECTS_ROOT}`
+      );
+      await vscode.commands.executeCommand('vscode.removeFromRecentlyOpened', remoteUri.toString());
+      this.logger.info(`Removed ${remoteUri.toString()} from recently opened`);
+    } catch (err) {
+      this.logger.debug(`Could not remove from recently opened: ${err}`);
     }
+
+    // Always close — there's nothing to connect to
+    await vscode.commands.executeCommand('workbench.action.remote.close');
   }
 
-  private async restartAndReload(connInfo: WorkspaceConnectionInfo): Promise<void> {
-    try {
-      await vscode.window.withProgress(
-        { title: `Restarting ${connInfo.workspaceName}`, location: vscode.ProgressLocation.Notification, cancellable: false },
-        async (progress) => {
-          progress.report({ message: 'Starting workspace...' });
-          const status = await this.checkAndStartWorkspace(connInfo.clusterUrl, connInfo.namespace, connInfo.workspaceName);
-          if (status === 'failed') { throw new Error('Workspace failed to start'); }
-
-          progress.report({ message: 'Waiting for pod...' });
-          await this.waitForPodReady(connInfo, 60_000);
-          progress.report({ message: 'Reloading...' });
-        }
-      );
-      await vscode.commands.executeCommand('workbench.action.reloadWindow');
-    } catch (err) {
-      this.logger.error(`Restart failed: ${err}`);
-      vscode.window.showErrorMessage(`Failed to restart: ${err instanceof Error ? err.message : String(err)}`);
-      await vscode.commands.executeCommand('workbench.action.remote.close');
-    }
+  private retryTemporarily(message: string): never {
+    throw vscode.RemoteAuthorityResolverError.TemporarilyNotAvailable(message);
   }
 
   // ─── App Port Tunneling ──────────────────────────────────────────────────
@@ -559,7 +440,7 @@ export class DevSpacesResolver implements vscode.RemoteAuthorityResolver, vscode
     const onDidDisposeEmitter = new vscode.EventEmitter<void>();
 
     const server = net.createServer((socket) => {
-      forward.portForward(namespace, podName, [remotePort], socket, null, socket);
+      void forward.portForward(namespace, podName, [remotePort], socket, null, socket);
     });
 
     await new Promise<void>((resolve, reject) => {

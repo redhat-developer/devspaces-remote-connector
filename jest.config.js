@@ -4,6 +4,7 @@ module.exports = {
   roots: ['<rootDir>/src'],
   testMatch: ['**/__tests__/**/*.ts', '**/?(*.)+(spec|test).ts'],
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json', 'node'],
+  setupFilesAfterEnv: ['<rootDir>/jest.setup.js'],
   collectCoverageFrom: [
     'src/**/*.ts',
     '!src/**/*.d.ts',
@@ -16,6 +17,9 @@ module.exports = {
   ],
   coverageReporters: ['text', 'lcov', 'cobertura'],
   coverageDirectory: 'coverage',
+  transformIgnorePatterns: [
+    'node_modules/(?!(@kubernetes)/)',
+  ],
   transform: {
     '^.+\\.tsx?$': ['ts-jest', {
       tsconfig: {

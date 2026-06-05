@@ -7,11 +7,10 @@ import { OpenShiftAuthProvider } from '../auth/OpenShiftAuthProvider';
 import { KubeClientFactory } from '../kubernetes/KubeClientFactory';
 import { DevWorkspaceApi } from '../kubernetes/DevWorkspaceApi';
 import { NamespaceApi } from '../kubernetes/NamespaceApi';
-import { PodApi } from '../kubernetes/PodApi';
 import { WorkspaceManager } from '../workspace/WorkspaceManager';
 import { WorkspaceTreeProvider } from '../ui/WorkspaceTreeProvider';
 import { ClusterManager } from './ClusterManager';
-import { CTX_INITIALIZING, STATE_CACHED_TOKEN } from '../constants';
+import { ConsoleLinkList } from '../kubernetes/DevWorkspaceTypes';
 
 const AUTO_REFRESH_INTERVAL = 15_000; // 15 seconds
 
@@ -23,6 +22,7 @@ export class ClusterSessionManager {
   private workspaceManagers = new Map<string, WorkspaceManager>();
   private refreshIntervals = new Map<string, NodeJS.Timeout>();
   private isInitializing = false;
+  private provisioningClusters = new Set<string>();
 
   constructor(
     private context: vscode.ExtensionContext,
@@ -106,8 +106,6 @@ export class ClusterSessionManager {
         return t.accessToken;
       }
     }
-    const cached = this.context.globalState.get<string>(STATE_CACHED_TOKEN);
-    if (cached) { return cached; }
     this.logger.debug(`No token for cluster ${clusterId}, skipping`);
     return undefined;
   }
@@ -117,8 +115,8 @@ export class ClusterSessionManager {
       const customApi = kubeConfig.makeApiClient(k8s.CustomObjectsApi);
       const consoleLinks = await customApi.listClusterCustomObject({
         group: 'console.openshift.io', version: 'v1', plural: 'consolelinks',
-      }) as any;
-      const devSpacesLink = consoleLinks?.items?.find((link: any) =>
+      }) as ConsoleLinkList;
+      const devSpacesLink = consoleLinks?.items?.find((link) =>
         link.metadata?.name?.includes('che') || link.metadata?.name?.includes('devspaces') ||
         link.spec?.href?.includes('devspaces') || link.spec?.href?.includes('codeready')
       );
@@ -138,8 +136,7 @@ export class ClusterSessionManager {
     const customApi = kubeConfig.makeApiClient(k8s.CustomObjectsApi);
     const devWorkspaceApi = new DevWorkspaceApi(customApi, clusterId);
     const namespaceApi = new NamespaceApi(coreApi, customApi, devSpacesUrl, accessToken);
-    const podApi = new PodApi(coreApi, kubeConfig);
-    const wm = new WorkspaceManager(devWorkspaceApi, namespaceApi, podApi);
+    const wm = new WorkspaceManager(devWorkspaceApi, namespaceApi);
     this.context.subscriptions.push(wm);
     return wm;
   }
@@ -159,9 +156,11 @@ export class ClusterSessionManager {
     if (username) {
       await wm.initialize(username);
       if (!wm.getNamespace()) {
-        this.triggerNamespaceProvisioning(username, devSpacesUrl, wm, clusterId, tp);
+        void this.triggerNamespaceProvisioning(username, devSpacesUrl, wm, clusterId, tp);
+      } else {
+        await this.clusterManager.updateClusterNamespace(clusterId, wm.getNamespace()!, username);
+        tp.setWorkspaces(clusterId, wm.getWorkspaces());
       }
-      tp.setWorkspaces(clusterId, wm.getWorkspaces());
     }
   }
 
@@ -178,27 +177,44 @@ export class ClusterSessionManager {
   ): Promise<void> {
     this.logger.info(`No namespace for ${username} — prompting to open dashboard`);
 
+    this.provisioningClusters.add(clusterId);
+
+    const clusterEntry = this.clusterManager.getClusters().find((c) => c.id === clusterId);
+    const clusterName = clusterEntry?.displayName ?? clusterId;
+
     const action = await vscode.window.showInformationMessage(
-      'Your Dev Spaces environment needs to be initialized. This requires a one-time visit to the dashboard.',
+      `Your Dev Spaces environment on "${clusterName}" needs to be initialized. This requires a one-time visit to the dashboard.\n\nAfter the dashboard loads, close the browser tab and return to the IDE.`,
+      { modal: true },
       'Open Dashboard'
     );
 
     if (action !== 'Open Dashboard') {
+      this.provisioningClusters.delete(clusterId);
       return;
     }
 
-    await vscode.env.openExternal(vscode.Uri.parse(`${devSpacesUrl}/api/kubernetes/namespace`));
+    await vscode.env.openExternal(vscode.Uri.parse(`${devSpacesUrl}/dashboard/`));
 
-    // Poll for namespace to appear
-    for (let i = 0; i < 12; i++) {
-      await new Promise((r) => setTimeout(r, 5000));
-      await wm.initialize(username);
-      if (wm.getNamespace()) {
-        vscode.window.showInformationMessage('Dev Spaces environment ready! You can close the dashboard tab.');
-        tp.setWorkspaces(clusterId, wm.getWorkspaces());
-        return;
+    // Poll for namespace with a progress notification
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: `Initializing "${clusterName}"`, cancellable: false },
+      async (progress) => {
+        progress.report({ message: 'Waiting for namespace provisioning...' });
+        for (let i = 0; i < 24; i++) {
+          await new Promise((r) => setTimeout(r, 5000));
+          await wm.initialize(username);
+          if (wm.getNamespace()) {
+            this.provisioningClusters.delete(clusterId);
+            tp.setWorkspaces(clusterId, wm.getWorkspaces());
+            vscode.window.showInformationMessage(`✅ Dev Spaces environment on "${clusterName}" is ready!`);
+            return;
+          }
+          progress.report({ message: `Waiting for namespace provisioning... (${(i + 1) * 5}s)` });
+        }
+        this.provisioningClusters.delete(clusterId);
+        vscode.window.showWarningMessage(`Namespace provisioning on "${clusterName}" timed out. Try refreshing.`);
       }
-    }
+    );
   }
 
   /**
@@ -238,7 +254,6 @@ export class ClusterSessionManager {
   async loadAllClusters(): Promise<void> {
     // Set initializing state before anything loads
     this.isInitializing = true;
-    await vscode.commands.executeCommand('setContext', CTX_INITIALIZING, true);
 
     const tp = this.treeProvider();
     const clusters = this.clusterManager.getClusters();
@@ -258,7 +273,6 @@ export class ClusterSessionManager {
 
     // Clear initializing state so the UI is usable immediately
     this.isInitializing = false;
-    await vscode.commands.executeCommand('setContext', CTX_INITIALIZING, false);
 
     // Run readiness check in the background (non-blocking)
     // Note: first-time user provisioning is handled per-cluster in initCluster

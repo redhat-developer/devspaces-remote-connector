@@ -20,6 +20,8 @@ export class WorkspaceTreeProvider
   private clusters: ClusterEntry[] = [];
   /** Workspaces keyed by cluster ID */
   private workspacesByCluster = new Map<string, WorkspaceModel[]>();
+  /** Clusters that are signed out */
+  private signedOutClusters = new Set<string>();
 
   /**
    * Set the clusters to display.
@@ -34,6 +36,16 @@ export class WorkspaceTreeProvider
    */
   setWorkspaces(clusterId: string, workspaces: WorkspaceModel[]): void {
     this.workspacesByCluster.set(clusterId, workspaces);
+    this.signedOutClusters.delete(clusterId);
+    this.onDidChangeTreeDataEmitter.fire();
+  }
+
+  /**
+   * Mark a cluster as signed out.
+   */
+  setClusterSignedOut(clusterId: string): void {
+    this.signedOutClusters.add(clusterId);
+    this.workspacesByCluster.delete(clusterId);
     this.onDidChangeTreeDataEmitter.fire();
   }
 
@@ -52,8 +64,12 @@ export class WorkspaceTreeProvider
     if (!element) {
       // Root level: show cluster nodes
       return this.clusters.map((cluster) => {
-        const workspaces = this.workspacesByCluster.get(cluster.id) ?? [];
-        return new ClusterTreeItem(cluster, workspaces.length);
+        if (this.signedOutClusters.has(cluster.id)) {
+          return new ClusterTreeItem(cluster, 0, false, true);
+        }
+        const workspaces = this.workspacesByCluster.get(cluster.id);
+        const isLoading = workspaces === undefined; // not yet loaded
+        return new ClusterTreeItem(cluster, workspaces?.length ?? 0, isLoading);
       });
     }
 

@@ -29,7 +29,17 @@ export async function getServerConfig(): Promise<ServerConfig> {
     const raw = await fs.promises.readFile(productJsonPath, 'utf-8');
     const product = JSON.parse(raw);
 
-    const userUrl = vscode.workspace.getConfiguration('devspaces').get<string>('rehDownloadUrl', '');
+    const userUrl = vscode.workspace.getConfiguration('devspaces').get<string>('rehDownloadUrl') ?? '';
+    // If config API returns empty (common in remote session), read default from our own package.json
+    let rehUrl = userUrl;
+    if (!rehUrl) {
+      try {
+        const ext = vscode.extensions.getExtension('asbx.remote-ssh');
+        const pkgDefault = ext?.packageJSON?.contributes?.configuration?.properties?.['devspaces.rehDownloadUrl']?.default;
+        if (pkgDefault) { rehUrl = pkgDefault; }
+      } catch { /* ignore */ }
+    }
+    logger.info(`ServerConfig: rehDownloadUrl = '${rehUrl || '(using product.json)'}'`);
     const defaultAppName = isKiro ? 'kiro-server' : 'code-server';
     const defaultDataFolder = isKiro ? '.kiro-server' : '.vscode-server';
 
@@ -39,7 +49,7 @@ export async function getServerConfig(): Promise<ServerConfig> {
       quality: product.quality ?? 'stable',
       serverApplicationName: product.serverApplicationName ?? defaultAppName,
       serverDataFolderName: product.serverDataFolderName ?? defaultDataFolder,
-      downloadUrlTemplate: userUrl || product.serverDownloadUrlTemplate || constructFallbackUrl(product) || '',
+      downloadUrlTemplate: rehUrl || product.serverDownloadUrlTemplate || constructFallbackUrl(product) || '',
     };
 
     logger.debug(`Server config: version=${cachedConfig.version} commit=${cachedConfig.commit.slice(0, 8)} app=${cachedConfig.serverApplicationName}`);

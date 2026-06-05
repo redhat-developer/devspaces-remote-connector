@@ -3,7 +3,13 @@ import { Logger } from '../util/Logger';
 import { TokenManager } from '../auth/TokenManager';
 import { ClusterDiscovery } from '../auth/ClusterDiscovery';
 import { KubeClientFactory } from '../kubernetes/KubeClientFactory';
-import { STATE_CACHED_TOKEN } from '../constants';
+import {
+  KubeAuthHelper,
+  findWorkspacePodAndContainer,
+  waitForWorkspacePhase,
+} from '../kubernetes/KubeAuthHelper';
+import { DW_API_GROUP, DW_API_VERSION, DW_PLURAL } from '../constants';
+import { DevWorkspaceResource } from '../kubernetes/DevWorkspaceTypes';
 
 const logger = Logger.getInstance();
 
@@ -16,37 +22,11 @@ export function createGetKubeConfig(
   kubeFactory: KubeClientFactory,
   clusterDiscovery: ClusterDiscovery
 ) {
-  return async (clusterUrl: string): Promise<k8s.KubeConfig | undefined> => {
-    try {
-      logger.info(`Resolver getKubeConfig: clusterUrl=${clusterUrl}`);
+  const helper = new KubeAuthHelper(tokenManager, clusterDiscovery, kubeFactory);
 
-      let accessToken: string | undefined;
-      const storedToken = await tokenManager.getToken(clusterUrl);
-      if (storedToken && tokenManager.isTokenValid(storedToken)) {
-        accessToken = storedToken.accessToken;
-        logger.info('Resolver getKubeConfig: token from SecretStorage');
-      }
-
-      if (!accessToken) {
-        const fallbackToken = globalState.get<string>(STATE_CACHED_TOKEN);
-        if (fallbackToken) {
-          accessToken = fallbackToken;
-          logger.info('Resolver getKubeConfig: token from globalState fallback');
-        }
-      }
-
-      if (!accessToken) {
-        logger.info('Resolver getKubeConfig: token NOT FOUND');
-        return undefined;
-      }
-
-      const endpoints = await clusterDiscovery.discover(clusterUrl);
-      logger.info(`Resolver getKubeConfig: apiUrl=${endpoints.apiUrl}`);
-      return kubeFactory.createConfig(endpoints.apiUrl, accessToken);
-    } catch (err) {
-      logger.error(`Resolver getKubeConfig failed: ${err}`);
-      return undefined;
-    }
+  return async (clusterUrl: string, extraKeys: string[] = []): Promise<k8s.KubeConfig | undefined> => {
+    logger.debug(`Resolver getKubeConfig: clusterUrl=${clusterUrl}${extraKeys.length ? `, extraKeys=[${extraKeys.join(',')}]` : ''}`);
+    return helper.getKubeConfig(clusterUrl, extraKeys);
   };
 }
 
@@ -59,68 +39,7 @@ export function createFindPodAndContainer() {
     namespace: string,
     devworkspaceId: string
   ): Promise<{ podName: string; containerName: string }> => {
-    const coreApi = kubeConfig.makeApiClient(k8s.CoreV1Api);
-    const podList = await coreApi.listNamespacedPod({
-      namespace,
-      labelSelector: `controller.devfile.io/devworkspace_id=${devworkspaceId}`,
-    });
-    const pods = podList.items;
-    if (pods.length === 0) {
-      throw new Error(`No running pod found for workspace ${devworkspaceId}`);
-    }
-    const pod = pods[0];
-
-    // Find the main container by reading the DevWorkspace CR
-    const customApi = kubeConfig.makeApiClient(k8s.CustomObjectsApi);
-    const workspaceName = pod.metadata?.labels?.['controller.devfile.io/devworkspace_name'] ?? '';
-    let mainContainerName: string | undefined;
-
-    if (workspaceName) {
-      try {
-        const dw = await customApi.getNamespacedCustomObject({
-          group: 'workspace.devfile.io',
-          version: 'v1alpha2',
-          namespace,
-          plural: 'devworkspaces',
-          name: workspaceName,
-        }) as any;
-
-        const components = dw?.spec?.template?.components ?? [];
-        for (const comp of components) {
-          if (comp.container && comp.container.mountSources !== false) {
-            mainContainerName = comp.name;
-            break;
-          }
-        }
-        logger.debug(`DevWorkspace ${workspaceName}: main container from mountSources = ${mainContainerName}`);
-      } catch (err) {
-        logger.debug(`Could not read DevWorkspace CR: ${err}`);
-      }
-    }
-
-    // Match the component name to the pod's container
-    const containers = pod.spec?.containers ?? [];
-    let mainContainer: k8s.V1Container | undefined;
-
-    if (mainContainerName) {
-      mainContainer = containers.find((c) => c.name === mainContainerName);
-    }
-
-    // Fallback: first container that isn't a known sidecar
-    if (!mainContainer) {
-      mainContainer = containers.find(
-        (c: k8s.V1Container) =>
-          !c.name.startsWith('che-gateway') &&
-          !c.name.startsWith('che-machine-exec') &&
-          !c.name.startsWith('che-code') &&
-          !c.name.startsWith('che-editor')
-      ) ?? containers[0];
-    }
-
-    return {
-      podName: pod.metadata?.name ?? '',
-      containerName: mainContainer?.name ?? 'tools',
-    };
+    return findWorkspacePodAndContainer(kubeConfig, namespace, devworkspaceId);
   };
 }
 
@@ -133,33 +52,38 @@ export function createCheckAndStartWorkspace(
   kubeFactory: KubeClientFactory,
   clusterDiscovery: ClusterDiscovery
 ) {
+  const helper = new KubeAuthHelper(tokenManager, clusterDiscovery, kubeFactory);
+
   return async (
     clusterUrl: string,
     namespace: string,
-    workspaceName: string
-  ): Promise<'running' | 'started' | 'failed'> => {
+    workspaceName: string,
+    extraKeys: string[] = []
+  ): Promise<'running' | 'started' | 'failed' | 'auth_failed' | 'not_found'> => {
     try {
-      let accessToken: string | undefined;
-      const storedToken = await tokenManager.getToken(clusterUrl);
-      if (storedToken && tokenManager.isTokenValid(storedToken)) {
-        accessToken = storedToken.accessToken;
-      }
-      if (!accessToken) {
-        accessToken = globalState.get<string>(STATE_CACHED_TOKEN);
-      }
-      if (!accessToken) { return 'failed'; }
+      const accessToken = await helper.resolveToken(clusterUrl, extraKeys);
+      if (!accessToken) { return 'auth_failed'; }
 
       const endpoints = await clusterDiscovery.discover(clusterUrl);
       const kubeConfig = kubeFactory.createConfig(endpoints.apiUrl, accessToken);
       const customApi = kubeConfig.makeApiClient(k8s.CustomObjectsApi);
 
-      const dw = await customApi.getNamespacedCustomObject({
-        group: 'workspace.devfile.io',
-        version: 'v1alpha2',
-        namespace,
-        plural: 'devworkspaces',
-        name: workspaceName,
-      }) as any;
+      let dw: DevWorkspaceResource;
+      try {
+        dw = await customApi.getNamespacedCustomObject({
+          group: DW_API_GROUP,
+          version: DW_API_VERSION,
+          namespace,
+          plural: DW_PLURAL,
+          name: workspaceName,
+        }) as DevWorkspaceResource;
+      } catch (fetchErr: any) {
+        if (isNotFoundError(fetchErr)) {
+          logger.warn(`Workspace ${workspaceName} not found (404) — it may have been deleted`);
+          return 'not_found';
+        }
+        throw fetchErr;
+      }
 
       const phase = dw?.status?.phase;
       logger.info(`Workspace ${workspaceName} phase: ${phase}`);
@@ -171,54 +95,52 @@ export function createCheckAndStartWorkspace(
       if (phase === 'Stopped' || phase === 'Failed') {
         logger.info(`Starting workspace ${workspaceName}...`);
         await customApi.patchNamespacedCustomObject({
-          group: 'workspace.devfile.io',
-          version: 'v1alpha2',
+          group: DW_API_GROUP,
+          version: DW_API_VERSION,
           namespace,
-          plural: 'devworkspaces',
+          plural: DW_PLURAL,
           name: workspaceName,
           body: [{ op: 'replace', path: '/spec/started', value: true }],
         });
 
-        return await waitForPhase(customApi, namespace, workspaceName, 'Running', 300_000)
+        return await waitForWorkspacePhase(customApi, namespace, workspaceName, 'Running', 300_000)
           ? 'started' : 'failed';
       }
 
       if (phase === 'Starting') {
-        return await waitForPhase(customApi, namespace, workspaceName, 'Running', 300_000)
+        return await waitForWorkspacePhase(customApi, namespace, workspaceName, 'Running', 300_000)
           ? 'running' : 'failed';
       }
 
       return 'failed';
-    } catch (err) {
+    } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      if (msg.includes('401') || msg.includes('Unauthorized')) {
+        logger.warn('checkAndStartWorkspace: token rejected (401), re-auth needed');
+        return 'auth_failed';
+      }
       logger.error(`checkAndStartWorkspace failed: ${err}`);
       return 'failed';
     }
   };
 }
 
+// ─── Helpers ───────────────────────────────────────────────────────────────────
+
 /**
- * Poll for a workspace to reach a target phase.
+ * Detect a 404 Not Found error from the Kubernetes client.
+ *
+ * The K8s JS client can surface 404 in multiple ways:
+ * - err.statusCode = 404 (newer client versions)
+ * - err.response.statusCode = 404
+ * - err.body.code = 404
+ * - err.message contains "HTTP-Code: 404" (older client / string-based errors)
  */
-async function waitForPhase(
-  customApi: k8s.CustomObjectsApi,
-  namespace: string,
-  workspaceName: string,
-  targetPhase: string,
-  timeoutMs: number
-): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 3000));
-    const check = await customApi.getNamespacedCustomObject({
-      group: 'workspace.devfile.io',
-      version: 'v1alpha2',
-      namespace,
-      plural: 'devworkspaces',
-      name: workspaceName,
-    }) as any;
-    const p = check?.status?.phase;
-    if (p === targetPhase) { return true; }
-    if (p === 'Failed') { return false; }
-  }
+function isNotFoundError(err: any): boolean {
+  if (err?.statusCode === 404) { return true; }
+  if (err?.response?.statusCode === 404) { return true; }
+  if (err?.body?.code === 404) { return true; }
+  const msg = err?.message ?? '';
+  if (msg.includes('HTTP-Code: 404') || msg.includes('"code":404')) { return true; }
   return false;
 }

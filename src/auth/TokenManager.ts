@@ -101,7 +101,7 @@ export class TokenManager {
 
     if (refreshIn <= 0) {
       this.logger.warn('Token is already within refresh window, triggering refresh now');
-      this.triggerRefresh();
+      void this.triggerRefresh();
       return;
     }
 
@@ -112,7 +112,7 @@ export class TokenManager {
     );
 
     this.refreshTimer = setTimeout(() => {
-      this.triggerRefresh();
+      void this.triggerRefresh();
     }, refreshIn);
   }
 

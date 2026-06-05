@@ -1,7 +1,7 @@
-import * as https from 'https';
 import * as k8s from '@kubernetes/client-node';
 import { Logger } from '../util/Logger';
-import { getHttpsAgent } from '../util/tls';
+import { request } from '../util/httpClient';
+import { ProjectList } from './DevWorkspaceTypes';
 
 /**
  * Discovers the user's DevSpaces namespace.
@@ -48,7 +48,7 @@ export class NamespaceApi {
     const name = `${username}-devspaces`;
     try {
       await this.coreApi.readNamespace({ name });
-      this.logger.info(`[Strategy 1] Found: ${name}`);
+      this.logger.debug(`[Strategy 1] Found: ${name}`);
       return name;
     } catch {
       this.logger.debug(`[Strategy 1] ${name} not found`);
@@ -66,7 +66,7 @@ export class NamespaceApi {
     const name = `${lower}-devspaces`;
     try {
       await this.coreApi.readNamespace({ name });
-      this.logger.info(`[Strategy 2] Found: ${name}`);
+      this.logger.debug(`[Strategy 2] Found: ${name}`);
       return name;
     } catch {
       this.logger.debug(`[Strategy 2] ${name} not found`);
@@ -102,7 +102,7 @@ export class NamespaceApi {
         if (!name) { continue; }
 
         if (name.startsWith(prefix)) {
-          this.logger.info(`[Strategy 3] Found via DevSpaces API: ${name}`);
+          this.logger.debug(`[Strategy 3] Found via DevSpaces API: ${name}`);
           return name;
         }
       }
@@ -111,7 +111,7 @@ export class NamespaceApi {
       if (items.length === 1) {
         const name = items[0].name ?? items[0].metadata?.name;
         if (name) {
-          this.logger.info(`[Strategy 3] Single namespace from DevSpaces API: ${name}`);
+          this.logger.debug(`[Strategy 3] Single namespace from DevSpaces API: ${name}`);
           return name;
         }
       }
@@ -139,7 +139,7 @@ export class NamespaceApi {
         group: 'project.openshift.io',
         version: 'v1',
         plural: 'projects',
-      }) as any;
+      }) as ProjectList;
 
       const projects = response?.items ?? [];
       this.logger.debug(`[Strategy 4] Found ${projects.length} projects`);
@@ -153,12 +153,12 @@ export class NamespaceApi {
 
         const cheUsername = project.metadata?.annotations?.['che.eclipse.org/username'];
         if (cheUsername && cheUsername.toLowerCase() === lowerUsername) {
-          this.logger.info(`[Strategy 4] Found by annotation: ${name}`);
+          this.logger.debug(`[Strategy 4] Found by annotation: ${name}`);
           return name;
         }
 
         if (name.startsWith(prefix)) {
-          this.logger.info(`[Strategy 4] Found by prefix: ${name}`);
+          this.logger.debug(`[Strategy 4] Found by prefix: ${name}`);
           return name;
         }
       }
@@ -188,7 +188,7 @@ export class NamespaceApi {
         const cheUsername = ns.metadata?.annotations?.['che.eclipse.org/username'];
 
         if (cheUsername && cheUsername.toLowerCase() === lowerUsername) {
-          this.logger.info(`[Strategy 5] Found by annotation: ${nsName}`);
+          this.logger.debug(`[Strategy 5] Found by annotation: ${nsName}`);
           return nsName;
         }
       }
@@ -203,30 +203,13 @@ export class NamespaceApi {
 
   // ─── HTTP Helper ─────────────────────────────────────────────────────────
 
-  private httpGet(url: string, token: string): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const parsed = new URL(url);
-      const req = https.get({
-        hostname: parsed.hostname,
-        port: parsed.port || 443,
-        path: parsed.pathname + parsed.search,
-        timeout: 10_000,
-        agent: getHttpsAgent(),
-        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
-      }, (res) => {
-        let data = '';
-        res.on('data', (chunk: Buffer) => { data += chunk.toString(); });
-        res.on('end', () => {
-          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-            resolve(data);
-          } else {
-            reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 200)}`));
-          }
-        });
-      });
-      req.on('error', reject);
-      req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-      req.end();
+  private async httpGet(url: string, token: string): Promise<string> {
+    const res = await request({
+      url,
+      method: 'GET',
+      timeout: 10_000,
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
     });
+    return res.data;
   }
 }

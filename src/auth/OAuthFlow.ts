@@ -1,8 +1,8 @@
 import * as http from 'http';
-import * as https from 'https';
 import * as crypto from 'crypto';
 import * as vscode from 'vscode';
 import { Logger } from '../util/Logger';
+import { postForm, HttpError } from '../util/httpClient';
 import { OAUTH_CALLBACK_TIMEOUT } from '../constants';
 
 export interface OAuthResult {
@@ -100,64 +100,48 @@ export class OAuthFlow {
     redirectUri: string,
     codeVerifier: string
   ): Promise<{ accessToken: string; expiresIn?: number }> {
-    const body = new URLSearchParams({
-      grant_type: 'authorization_code',
-      code,
-      redirect_uri: redirectUri,
-      code_verifier: codeVerifier,
-    }).toString();
+    // openshift-cli-client is a public client (no secret), but oc sends
+    // Basic auth with client_id and empty password
+    const basicAuth = Buffer.from('openshift-cli-client:').toString('base64');
 
-    return new Promise((resolve, reject) => {
-      const parsed = new URL(tokenUrl);
-
-      // openshift-cli-client is a public client (no secret), but oc sends
-      // Basic auth with client_id and empty password
-      const basicAuth = Buffer.from('openshift-cli-client:').toString('base64');
-
-      const options = {
-        hostname: parsed.hostname,
-        port: parsed.port || 443,
-        path: parsed.pathname + parsed.search,
-        method: 'POST',
-        timeout: 30_000,
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'Content-Length': Buffer.byteLength(body),
-          'Authorization': `Basic ${basicAuth}`,
-          'Accept': 'application/json',
+    try {
+      const res = await postForm(
+        tokenUrl,
+        {
+          grant_type: 'authorization_code',
+          code,
+          redirect_uri: redirectUri,
+          code_verifier: codeVerifier,
         },
+        {
+          Authorization: `Basic ${basicAuth}`,
+        }
+      );
+
+      const json = JSON.parse(res.data);
+      if (json.error) {
+        throw new Error(`Token exchange failed: ${json.error} - ${json.error_description ?? ''}`);
+      }
+      if (!json.access_token) {
+        throw new Error(`Unexpected token response: ${res.data.slice(0, 200)}`);
+      }
+      return {
+        accessToken: String(json.access_token),
+        expiresIn: json.expires_in ? Number(json.expires_in) : undefined,
       };
-
-      const req = https.request(options, (res: import('http').IncomingMessage) => {
-        let data = '';
-        res.on('data', (chunk: Buffer) => {
-          data += chunk.toString();
-          if (data.length > 1_048_576) { req.destroy(); reject(new Error('Response too large')); }
-        });
-        res.on('end', () => {
-          try {
-            const json = JSON.parse(data);
-            if (json.error) {
-              reject(new Error(`Token exchange failed: ${json.error} - ${json.error_description ?? ''}`));
-            } else if (json.access_token) {
-              resolve({
-                accessToken: String(json.access_token),
-                expiresIn: json.expires_in ? Number(json.expires_in) : undefined,
-              });
-            } else {
-              reject(new Error(`Unexpected token response: ${data.slice(0, 200)}`));
-            }
-          } catch {
-            reject(new Error(`Failed to parse token response: ${data.slice(0, 200)}`));
+    } catch (err) {
+      if (err instanceof HttpError) {
+        // Try to parse error details from the response body
+        try {
+          const json = JSON.parse(err.responseBody);
+          if (json.error) {
+            throw new Error(`Token exchange failed: ${json.error} - ${json.error_description ?? ''}`);
           }
-        });
-      });
-
-      req.on('error', reject);
-      req.on('timeout', () => { req.destroy(); reject(new Error('Token exchange timed out')); });
-      req.write(body);
-      req.end();
-    });
+        } catch { /* fall through to rethrow */ }
+        throw new Error(`Token exchange failed: HTTP ${err.statusCode}`);
+      }
+      throw err;
+    }
   }
 
   /**
@@ -237,7 +221,7 @@ export class OAuthFlow {
         }, OAUTH_CALLBACK_TIMEOUT);
 
         // Clear timeout when result is received
-        resultPromise.finally(() => clearTimeout(timeout));
+        void resultPromise.finally(() => clearTimeout(timeout));
 
         resolveSetup({ server, port: addr.port, resultPromise });
       });

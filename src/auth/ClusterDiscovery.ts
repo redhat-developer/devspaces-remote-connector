@@ -1,6 +1,5 @@
-import * as https from 'https';
 import { Logger } from '../util/Logger';
-import { getHttpsAgent } from '../util/tls';
+import { request, HttpError } from '../util/httpClient';
 
 export interface ClusterEndpoints {
   /** The DevSpaces dashboard base URL, e.g. https://devspaces.apps.devspc02-1d.zs5b.p1.openshiftapps.com */
@@ -138,49 +137,39 @@ export class ClusterDiscovery {
    * Used as a fallback when the URL is a CNAME (e.g. devspaces.example.com).
    */
   private async discoverAppsDomainViaRedirect(baseUrl: string): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const url = `${baseUrl}/oauth/start`;
-      this.logger.debug(`Following redirect from ${url}`);
+    const url = `${baseUrl}/oauth/start`;
+    this.logger.debug(`Following redirect from ${url}`);
 
-      const req = https.get(
-        url,
-        { timeout: 15_000, headers: { Accept: 'text/html' }, agent: getHttpsAgent() },
-        (res) => {
-          const location = res.headers.location;
-          if (location) {
-            try {
-              const redirectUrl = new URL(location);
-              const host = redirectUrl.hostname;
-              // oauth-openshift.apps.<cluster-domain> → apps.<cluster-domain>
-              const appsDomain = host.replace(/^oauth-openshift\./, '');
-              if (appsDomain.startsWith('apps.')) {
-                resolve(appsDomain);
-                return;
-              }
-            } catch {
-              // Fall through
-            }
-          }
-
-          // Consume the response body to avoid socket hang
-          res.resume();
-
-          reject(
-            new Error(
-              `Could not discover cluster from ${baseUrl}. ` +
-              `No valid redirect from /oauth/start (status: ${res.statusCode}). ` +
-              `Try pasting a URL that contains the cluster domain (e.g. devspaces.example.com).`
-            )
-          );
-        }
+    try {
+      await request({ url, method: 'GET', headers: { Accept: 'text/html' } });
+      // If we got a 2xx, there's no redirect — can't discover the domain
+      throw new Error(
+        `Could not discover cluster from ${baseUrl}. ` +
+        `Expected redirect from /oauth/start. ` +
+        `Try pasting a URL that contains the cluster domain (e.g. devspaces.example.com).`
       );
-
-      req.on('error', (err) => {
-        reject(new Error(`Failed to connect to ${baseUrl}: ${err.message}`));
-      });
-      req.on('timeout', () => { req.destroy(); reject(new Error(`Connection to ${baseUrl} timed out`)); });
-      req.end();
-    });
+    } catch (err) {
+      if (err instanceof HttpError && err.statusCode >= 300 && err.statusCode < 400) {
+        const location = err.responseHeaders.location;
+        if (location) {
+          const locationStr = Array.isArray(location) ? location[0] : location;
+          try {
+            const host = new URL(locationStr).hostname;
+            // oauth-openshift.apps.<cluster-domain> → apps.<cluster-domain>
+            const appsDomain = host.replace(/^oauth-openshift\./, '');
+            if (appsDomain.startsWith('apps.')) {
+              return appsDomain;
+            }
+          } catch { /* fall through */ }
+        }
+        throw new Error(
+          `Could not discover cluster from ${baseUrl}. ` +
+          `No valid redirect from /oauth/start (status: ${err.statusCode}). ` +
+          `Try pasting a URL that contains the cluster domain (e.g. devspaces.example.com).`
+        );
+      }
+      throw err;
+    }
   }
 
   /**
@@ -189,39 +178,23 @@ export class ClusterDiscovery {
   private async fetchOAuthMetadata(
     apiUrl: string
   ): Promise<{ authorization_endpoint: string; token_endpoint: string }> {
-    return new Promise((resolve, reject) => {
-      const url = `${apiUrl}/.well-known/oauth-authorization-server`;
-      this.logger.debug(`Fetching OAuth metadata from ${url}`);
+    const url = `${apiUrl}/.well-known/oauth-authorization-server`;
+    this.logger.debug(`Fetching OAuth metadata from ${url}`);
 
-      const req = https.get(url, { timeout: 15_000 }, (res) => {
-        let data = '';
-        res.on('data', (chunk: Buffer) => {
-          data += chunk.toString();
-          if (data.length > 1_048_576) { req.destroy(); reject(new Error('Response too large')); }
-        });
-        res.on('end', () => {
-          try {
-            const meta = JSON.parse(data);
-            if (!meta.authorization_endpoint || !meta.token_endpoint) {
-              reject(
-                new Error(
-                  'OAuth metadata missing authorization_endpoint or token_endpoint'
-                )
-              );
-              return;
-            }
-            resolve(meta);
-          } catch {
-            reject(new Error(`Failed to parse OAuth metadata from ${apiUrl}: ${data.slice(0, 200)}`));
-          }
-        });
-      });
-
-      req.on('error', (err) => {
-        reject(new Error(`Failed to fetch OAuth metadata from ${apiUrl}: ${err.message}`));
-      });
-      req.on('timeout', () => { req.destroy(); reject(new Error(`OAuth metadata request to ${apiUrl} timed out`)); });
-      req.end();
-    });
+    try {
+      const res = await request({ url, method: 'GET' });
+      const meta = JSON.parse(res.data);
+      if (!meta.authorization_endpoint || !meta.token_endpoint) {
+        throw new Error('OAuth metadata missing authorization_endpoint or token_endpoint');
+      }
+      return meta;
+    } catch (err) {
+      if (err instanceof HttpError) {
+        throw new Error(`Failed to fetch OAuth metadata from ${apiUrl}: HTTP ${err.statusCode}`);
+      }
+      throw err instanceof Error
+        ? new Error(`Failed to fetch OAuth metadata from ${apiUrl}: ${err.message}`)
+        : new Error(`Failed to fetch OAuth metadata from ${apiUrl}: ${err}`);
+    }
   }
 }
