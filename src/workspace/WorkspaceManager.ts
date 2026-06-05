@@ -2,7 +2,6 @@ import * as vscode from 'vscode';
 import { Logger } from '../util/Logger';
 import { DevWorkspaceApi } from '../kubernetes/DevWorkspaceApi';
 import { NamespaceApi } from '../kubernetes/NamespaceApi';
-import { PodApi } from '../kubernetes/PodApi';
 import { WorkspaceModel } from './WorkspaceModel';
 import { WorkspacePhase } from '../constants';
 
@@ -20,8 +19,7 @@ export class WorkspaceManager {
 
   constructor(
     private devWorkspaceApi: DevWorkspaceApi,
-    private namespaceApi: NamespaceApi,
-    private podApi: PodApi
+    private namespaceApi: NamespaceApi
   ) {}
 
   async initialize(username: string): Promise<void> {
@@ -39,7 +37,7 @@ export class WorkspaceManager {
     }
     try {
       this.workspaces = await this.devWorkspaceApi.list(this.userNamespace);
-      this.logger.info(`Loaded ${this.workspaces.length} workspaces`);
+      this.logger.debug(`Loaded ${this.workspaces.length} workspaces`);
       this.onDidChangeWorkspacesEmitter.fire();
     } catch (err) {
       this.logger.error(`Failed to refresh workspaces: ${err}`);

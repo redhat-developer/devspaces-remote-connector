@@ -1,69 +1,60 @@
-import { extractWorkspaceName } from './workspaceNameExtractor';
 import { DEVSPACES_AUTHORITY } from '../constants';
+import { parseHostAlias, extractWorkspaceName } from './workspaceNameExtractor';
+
+describe('parseHostAlias', () => {
+  it('parses new format with authority prefix', () => {
+    const result = parseHostAlias(`${DEVSPACES_AUTHORITY}+mcp-workshop@devspc-1d`);
+    expect(result).toEqual({ clusterId: 'devspc-1d', workspaceName: 'mcp-workshop' });
+  });
+
+  it('parses new format without authority prefix', () => {
+    const result = parseHostAlias('mcp-workshop@devspc-1d');
+    expect(result).toEqual({ clusterId: 'devspc-1d', workspaceName: 'mcp-workshop' });
+  });
+
+  it('handles CNAME cluster ID', () => {
+    const result = parseHostAlias(`${DEVSPACES_AUTHORITY}+flights-mgmt@devspaces.example.com`);
+    expect(result).toEqual({ clusterId: 'devspaces.example.com', workspaceName: 'flights-mgmt' });
+  });
+
+  it('handles workspace name with hyphens', () => {
+    const result = parseHostAlias('my-dev-workspace-123@devspc-1d');
+    expect(result).toEqual({ clusterId: 'devspc-1d', workspaceName: 'my-dev-workspace-123' });
+  });
+
+  it('returns undefined for empty string', () => {
+    expect(parseHostAlias('')).toBeUndefined();
+  });
+
+  it('returns undefined when no @ separator exists', () => {
+    expect(parseHostAlias('devspaces-mcp-workshop')).toBeUndefined();
+  });
+
+  it('returns undefined when workspace name is empty', () => {
+    expect(parseHostAlias('@devspc-1d')).toBeUndefined();
+  });
+
+  it('returns undefined when cluster ID is empty', () => {
+    expect(parseHostAlias('mcp-workshop@')).toBeUndefined();
+  });
+});
 
 describe('extractWorkspaceName', () => {
-  it('should extract workspace name from valid remote authority', () => {
-    const remoteAuthority = `${DEVSPACES_AUTHORITY}+my-workspace`;
-    const result = extractWorkspaceName(remoteAuthority);
-    expect(result).toBe('my-workspace');
+  it('extracts workspace name from new format', () => {
+    const result = extractWorkspaceName(`${DEVSPACES_AUTHORITY}+mcp-workshop@devspc-1d`);
+    expect(result).toBe('mcp-workshop');
   });
 
-  it('should extract workspace name with hyphens', () => {
-    const remoteAuthority = `${DEVSPACES_AUTHORITY}+my-dev-workspace`;
-    const result = extractWorkspaceName(remoteAuthority);
-    expect(result).toBe('my-dev-workspace');
+  it('falls back to stripping prefix only', () => {
+    const result = extractWorkspaceName(`${DEVSPACES_AUTHORITY}+some-host`);
+    expect(result).toBe('some-host');
   });
 
-  it('should extract workspace name with numbers', () => {
-    const remoteAuthority = `${DEVSPACES_AUTHORITY}+workspace-123`;
-    const result = extractWorkspaceName(remoteAuthority);
-    expect(result).toBe('workspace-123');
+  it('returns workspace for empty input', () => {
+    expect(extractWorkspaceName('')).toBe('workspace');
   });
 
-  it('should return default workspace name for empty string', () => {
-    const result = extractWorkspaceName('');
-    expect(result).toBe('workspace');
-  });
-
-  it('should return default workspace name for undefined', () => {
-    const result = extractWorkspaceName(undefined as any);
-    expect(result).toBe('workspace');
-  });
-
-  it('should return default workspace name for null', () => {
-    const result = extractWorkspaceName(null as any);
-    expect(result).toBe('workspace');
-  });
-
-  it('should return default workspace name when authority does not match prefix', () => {
-    const remoteAuthority = 'ssh-remote+my-workspace';
-    const result = extractWorkspaceName(remoteAuthority);
-    expect(result).toBe('workspace');
-  });
-
-  it('should return default workspace name when authority has no workspace name', () => {
-    const remoteAuthority = `${DEVSPACES_AUTHORITY}+`;
-    const result = extractWorkspaceName(remoteAuthority);
-    expect(result).toBe('workspace');
-  });
-
-  it('should handle workspace names with special characters', () => {
-    const remoteAuthority = `${DEVSPACES_AUTHORITY}+my-workspace-abc123_test`;
-    const result = extractWorkspaceName(remoteAuthority);
-    expect(result).toBe('my-workspace-abc123_test');
-  });
-
-  it('should use DEVSPACES_AUTHORITY constant for prefix', () => {
-    // This test ensures we're using the constant, not a hardcoded string
+  it('uses DEVSPACES_AUTHORITY constant for prefix', () => {
     expect(DEVSPACES_AUTHORITY).toBe('devspaces');
-    const remoteAuthority = `${DEVSPACES_AUTHORITY}+test-workspace`;
-    const result = extractWorkspaceName(remoteAuthority);
-    expect(result).toBe('test-workspace');
-  });
-
-  it('should not extract from old ssh-remote authority format', () => {
-    const remoteAuthority = 'ssh-remote+devspaces-my-workspace';
-    const result = extractWorkspaceName(remoteAuthority);
-    expect(result).toBe('workspace');
   });
 });

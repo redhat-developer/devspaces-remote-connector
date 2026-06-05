@@ -1,18 +1,14 @@
 import { ClusterEntry } from '../cluster/ClusterManager';
 import * as vscode from 'vscode';
-import * as k8s from '@kubernetes/client-node';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
 import { Logger } from '../util/Logger';
 import { WorkspaceTreeItem } from '../ui/WorkspaceTreeItem';
 import { WorkspaceManager } from '../workspace/WorkspaceManager';
 import { WorkspaceModel } from '../workspace/WorkspaceModel';
-import { WorkspacePhase, PROJECTS_ROOT, STATE_CACHED_TOKEN, STATE_ACTIVE_CONNECTION, SIDECAR_PREFIXES, DEVSPACES_AUTHORITY } from '../constants';
+import { WorkspacePhase, PROJECTS_ROOT, STATE_ACTIVE_CONNECTION, STATE_CONNECTIONS_MAP, DEVSPACES_AUTHORITY } from '../constants';
 import { KubeClientFactory } from '../kubernetes/KubeClientFactory';
 import { ClusterManager } from '../cluster/ClusterManager';
-import { execOnPod } from '../kubernetes/execHelper';
 import { ActiveConnectionInfo } from './remoteCommands';
+import { copyKiroAuthToPod, discoverProjectFolder } from './workspaceHelpers';
 
 export interface WorkspaceCommandContext {
   context: vscode.ExtensionContext;
@@ -222,7 +218,6 @@ export function registerWorkspaceCommands(ctx: WorkspaceCommandContext): void {
 
             progress.report({ message: '(2/4) Preparing connection...' });
             const token = await authProvider.getAccessToken();
-            await context.globalState.update(STATE_CACHED_TOKEN, token);
 
             const wsCluster = clusterManager.getClusters().find((c) => c.id === workspace.clusterId);
             const workspaceClusterUrl = wsCluster?.devSpacesUrl ?? '';
@@ -230,14 +225,19 @@ export function registerWorkspaceCommands(ctx: WorkspaceCommandContext): void {
               throw new Error('Could not determine cluster for this workspace');
             }
 
-            const hostAlias = `devspaces-${workspace.name}`;
-            await context.globalState.update(STATE_ACTIVE_CONNECTION, {
+            const hostAlias = `${workspace.name}@${wsCluster.id}`;
+            const connInfo: ActiveConnectionInfo = {
               workspaceName: workspace.name,
               namespace: workspace.namespace,
               devworkspaceId: workspace.devworkspaceId,
               hostAlias,
               clusterUrl: workspaceClusterUrl,
-            } as ActiveConnectionInfo);
+            };
+            await context.globalState.update(STATE_ACTIVE_CONNECTION, connInfo);
+            // Also store in connections map for multi-workspace recent lookup
+            const connectionsMap = context.globalState.get<Record<string, ActiveConnectionInfo>>(STATE_CONNECTIONS_MAP, {});
+            connectionsMap[hostAlias] = connInfo;
+            await context.globalState.update(STATE_CONNECTIONS_MAP, connectionsMap);
 
             if (cancellationToken.isCancellationRequested) {
               await context.globalState.update(STATE_ACTIVE_CONNECTION, undefined);
@@ -311,9 +311,39 @@ export function registerWorkspaceCommands(ctx: WorkspaceCommandContext): void {
   // --- Open Dashboard ---
   context.subscriptions.push(
     vscode.commands.registerCommand('devspaces.openInDashboard', async () => {
-      const cluster = clusterManager.getClusters()[0];
-      if (!cluster) { vscode.window.showWarningMessage('No cluster configured.'); return; }
+      const clusters = clusterManager.getClusters();
+      if (clusters.length === 0) { vscode.window.showWarningMessage('No cluster configured.'); return; }
+      let cluster = clusters[0];
+      if (clusters.length > 1) {
+        const picked = await vscode.window.showQuickPick(
+          clusters.map((c) => ({ label: c.displayName, description: c.devSpacesUrl, cluster: c })),
+          { placeHolder: 'Select a cluster' }
+        );
+        if (!picked) { return; }
+        cluster = picked.cluster;
+      }
       await vscode.env.openExternal(vscode.Uri.parse(`${cluster.devSpacesUrl}/dashboard/#/workspaces`));
+    })
+  );
+
+  // --- Open OpenShift Console ---
+  context.subscriptions.push(
+    vscode.commands.registerCommand('devspaces.openConsole', async () => {
+      const clusters = clusterManager.getClusters();
+      if (clusters.length === 0) { vscode.window.showWarningMessage('No cluster configured.'); return; }
+      let cluster = clusters[0];
+      if (clusters.length > 1) {
+        const picked = await vscode.window.showQuickPick(
+          clusters.map((c) => ({ label: c.displayName, description: c.devSpacesUrl, cluster: c })),
+          { placeHolder: 'Select a cluster' }
+        );
+        if (!picked) { return; }
+        cluster = picked.cluster;
+      }
+      const consoleUrl = cluster.appsDomain
+        ? `https://console-openshift-console.${cluster.appsDomain}`
+        : cluster.devSpacesUrl;
+      await vscode.env.openExternal(vscode.Uri.parse(consoleUrl));
     })
   );
 
@@ -437,84 +467,4 @@ async function pickCluster(clusterMgr: ClusterManager, item?: any): Promise<Clus
     { placeHolder: 'Select a cluster to create the workspace on', ignoreFocusOut: true }
   );
   return picked?.cluster;
-}
-
-async function copyKiroAuthToPod(
-  kubeConfig: k8s.KubeConfig,
-  workspace: WorkspaceModel
-): Promise<void> {
-  const logger = Logger.getInstance();
-
-  const ssoDir = path.join(os.homedir(), '.aws', 'sso', 'cache');
-  const kiroAuthFile = path.join(ssoDir, 'kiro-auth-token.json');
-  if (!fs.existsSync(kiroAuthFile)) { return; }
-
-  const coreApi = kubeConfig.makeApiClient(k8s.CoreV1Api);
-  const podList = await coreApi.listNamespacedPod({
-    namespace: workspace.namespace,
-    labelSelector: `controller.devfile.io/devworkspace_id=${workspace.devworkspaceId}`,
-  });
-  if (podList.items.length === 0) { return; }
-
-  const pod = podList.items[0];
-  const podName = pod.metadata?.name ?? '';
-  const containers = pod.spec?.containers ?? [];
-  const mainContainer = containers.find((c) => !SIDECAR_PREFIXES.some((p) => c.name.startsWith(p))) ?? containers[0];
-  const containerName = mainContainer?.name ?? 'tools';
-
-  try {
-    const check = await execOnPod(kubeConfig, workspace.namespace, podName, containerName,
-      'test -f $HOME/.aws/sso/cache/kiro-auth-token.json && echo EXISTS || echo MISSING');
-    if (check === 'EXISTS') { logger.info('Remote already has Kiro IDE auth token, skipping'); return; }
-    const authContent = fs.readFileSync(kiroAuthFile, 'utf-8');
-    const b64 = Buffer.from(authContent).toString('base64');
-    await execOnPod(kubeConfig, workspace.namespace, podName, containerName,
-      `mkdir -p $HOME/.aws/sso/cache && printf '%s' '${b64}' | base64 -d > $HOME/.aws/sso/cache/kiro-auth-token.json && chmod 600 $HOME/.aws/sso/cache/kiro-auth-token.json`);
-    logger.info('Kiro IDE auth token synced to pod');
-  } catch (err) {
-    logger.debug(`Could not sync Kiro IDE auth: ${err}`);
-  }
-}
-
-async function discoverProjectFolder(kubeConfig: k8s.KubeConfig, workspace: WorkspaceModel): Promise<string> {
-  const coreApi = kubeConfig.makeApiClient(k8s.CoreV1Api);
-  const podList = await coreApi.listNamespacedPod({
-    namespace: workspace.namespace,
-    labelSelector: `controller.devfile.io/devworkspace_id=${workspace.devworkspaceId}`,
-  });
-  const pod = podList.items[0];
-  if (!pod) { return PROJECTS_ROOT; }
-
-  const customApi = kubeConfig.makeApiClient(k8s.CustomObjectsApi);
-  const dwName = pod.metadata?.labels?.['controller.devfile.io/devworkspace_name'] ?? workspace.name;
-  let mainContainerName = 'tools';
-  let sourceMapping = PROJECTS_ROOT;
-  try {
-    const dw = await customApi.getNamespacedCustomObject({
-      group: 'workspace.devfile.io', version: 'v1alpha2', namespace: workspace.namespace, plural: 'devworkspaces', name: dwName,
-    }) as any;
-    for (const comp of dw?.spec?.template?.components ?? []) {
-      if (comp.container && comp.container.mountSources !== false) {
-        mainContainerName = comp.name;
-        if (comp.container.sourceMapping) { sourceMapping = comp.container.sourceMapping; }
-        break;
-      }
-    }
-  } catch { /* use defaults */ }
-
-  let projectFolder = sourceMapping;
-  try { await execOnPod(kubeConfig, workspace.namespace, pod.metadata!.name!, mainContainerName, ['test', '-d', sourceMapping]); } catch {
-    try { projectFolder = (await execOnPod(kubeConfig, workspace.namespace, pod.metadata!.name!, mainContainerName, ['bash', '-c', 'echo $HOME'])) || '/home/user'; } catch { projectFolder = '/home/user'; }
-    return projectFolder;
-  }
-
-  const lsOutput = await execOnPod(kubeConfig, workspace.namespace, pod.metadata!.name!, mainContainerName, ['ls', sourceMapping]);
-  const dirs = lsOutput.split('\n').filter((d) => d.trim().length > 0);
-  if (dirs.length === 1) { return `${sourceMapping}/${dirs[0]}`; }
-  if (workspace.gitRepoUrl) {
-    const repoName = workspace.gitRepoUrl.replace(/\.git$/, '').split('/').pop();
-    const match = dirs.find((d) => d === repoName);
-    if (match) { return `${sourceMapping}/${match}`; }
-  }
-  return projectFolder;
 }

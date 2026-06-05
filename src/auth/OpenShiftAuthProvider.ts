@@ -1,14 +1,13 @@
-import * as https from 'https';
 import * as vscode from 'vscode';
 import { Logger } from '../util/Logger';
 import { TokenManager, StoredToken } from './TokenManager';
 import { OAuthFlow } from './OAuthFlow';
 import { ClusterDiscovery, ClusterEndpoints } from './ClusterDiscovery';
+import { getJson } from '../util/httpClient';
 import {
   CTX_AUTHENTICATED,
   STATE_CLUSTER_URL,
   STATE_CLUSTER_DISPLAY_URL,
-  STATE_CACHED_TOKEN,
 } from '../constants';
 
 /**
@@ -72,9 +71,6 @@ export class OpenShiftAuthProvider implements vscode.AuthenticationProvider, vsc
 
     await this.tokenManager.storeToken(clusterUrl, newToken);
     this.storeClusterUrl(clusterUrl);
-
-    // Update cached token in globalState for resolver access
-    this.context.globalState.update(STATE_CACHED_TOKEN, newToken.accessToken);
 
     this.logger.info('Silent re-authentication successful');
   }
@@ -157,15 +153,16 @@ export class OpenShiftAuthProvider implements vscode.AuthenticationProvider, vsc
     // Also store under the cluster ID (appsDomain) so initCluster can find it
     if (this.endpoints.appsDomain) {
       await this.tokenManager.storeToken(this.endpoints.appsDomain, token);
+      // Also store under the cluster short prefix (e.g. devspc-1d)
+      const parts = this.endpoints.appsDomain.replace(/^apps\./, '').split('.');
+      if (parts.length >= 3) {
+        await this.tokenManager.storeToken(parts[0], token);
+      }
     }
     this.storeClusterUrl(clusterUrl);
 
     // Save the user's original URL for display purposes
     this.context.globalState.update(STATE_CLUSTER_DISPLAY_URL, clusterUrl);
-
-    // Cache access token in globalState so the resolver can read it
-    // in new windows where SecretStorage may not be accessible
-    this.context.globalState.update(STATE_CACHED_TOKEN, token.accessToken);
 
     const session = this.tokenToSession(token);
 
@@ -319,36 +316,15 @@ export class OpenShiftAuthProvider implements vscode.AuthenticationProvider, vsc
     accessToken: string,
     apiUrl: string
   ): Promise<string | undefined> {
-    return new Promise((resolve) => {
-      const url = new URL(`${apiUrl}/apis/user.openshift.io/v1/users/~`);
-      const req = https.get(
-        {
-          hostname: url.hostname,
-          port: url.port || 6443,
-          path: url.pathname,
-          timeout: 15_000,
-          headers: { Authorization: `Bearer ${accessToken}` },
-        },
-        (res: import('http').IncomingMessage) => {
-          let data = '';
-          res.on('data', (chunk: Buffer) => {
-            data += chunk.toString();
-            if (data.length > 1_048_576) { req.destroy(); resolve(undefined); }
-          });
-          res.on('end', () => {
-            try {
-              const user = JSON.parse(data);
-              resolve(user.metadata?.name);
-            } catch {
-              resolve(undefined);
-            }
-          });
-        }
+    try {
+      const user = await getJson<{ metadata?: { name?: string } }>(
+        `${apiUrl}/apis/user.openshift.io/v1/users/~`,
+        { Authorization: `Bearer ${accessToken}` }
       );
-      req.on('error', () => resolve(undefined));
-      req.on('timeout', () => { req.destroy(); resolve(undefined); });
-      req.end();
-    });
+      return user.metadata?.name;
+    } catch {
+      return undefined;
+    }
   }
 
   private tokenToSession(token: StoredToken): vscode.AuthenticationSession {

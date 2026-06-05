@@ -5,25 +5,39 @@ import * as https from 'https';
 import * as path from 'path';
 import * as os from 'os';
 import * as tls from 'tls';
+import { CA_BUNDLE } from '../generated/ca-bundle';
+import { Logger } from './Logger';
 
 /** Cached extra CA certificates (PEM format) */
 let extraCAs: string | undefined;
 
 /**
- * Load the system CA certificates into Node's TLS trust store.
+ * Load CA certificates for TLS trust.
  *
  * Strategy:
- * 1. Export CAs from the OS keychain/store
- * 2. Set NODE_EXTRA_CA_CERTS (works if Node hasn't frozen the root store yet)
- * 3. Cache the CAs so getHttpsAgent() can use them as a fallback
+ * 1. If a CA bundle is bundled with the extension, use it exclusively (skip system CAs)
+ * 2. Otherwise, fall back to exporting CAs from the OS keychain/store
  *
  * Call once during extension activation, before any HTTPS calls.
  */
 export function loadSystemCAs(): void {
+  const logger = Logger.getInstance();
+
+  // If a CA bundle is bundled in the extension, use it and skip system CAs entirely.
+  // This avoids issues with expired certs in system stores (e.g. Windows).
+  if (CA_BUNDLE && CA_BUNDLE.trim().length > 0) {
+    extraCAs = CA_BUNDLE.trim();
+    const certCount = (extraCAs.match(/-----BEGIN CERTIFICATE-----/g) || []).length;
+    logger.debug(`[TLS] Using bundled CA bundle (${certCount} certs). Skipping system CA loading.`);
+    return;
+  }
+
+  logger.debug('[TLS] No bundled CA bundle found, falling back to system CAs.');
+
   if (process.env.NODE_EXTRA_CA_CERTS) {
-    // User already configured custom CAs — load them for our agent fallback
     try {
       extraCAs = fs.readFileSync(process.env.NODE_EXTRA_CA_CERTS, 'utf-8');
+      logger.debug(`[TLS] Loaded CAs from NODE_EXTRA_CA_CERTS: ${process.env.NODE_EXTRA_CA_CERTS}`);
     } catch { /* ignore */ }
     return;
   }
@@ -32,7 +46,6 @@ export function loadSystemCAs(): void {
     let certs: string | undefined;
 
     if (process.platform === 'darwin') {
-      // macOS: export from system keychains + user login keychain
       const keychains = [
         '/System/Library/Keychains/SystemRootCertificates.keychain',
         '/Library/Keychains/System.keychain',
@@ -41,14 +54,13 @@ export function loadSystemCAs(): void {
       if (fs.existsSync(loginKeychain)) {
         keychains.push(loginKeychain);
       }
-
       certs = execFileSync('security', [
         'find-certificate', '-a', '-p',
         ...keychains,
       ], { encoding: 'utf-8', timeout: 15_000 });
+      logger.debug('[TLS] Exported system CAs from macOS keychains.');
 
     } else if (process.platform === 'win32') {
-      // Windows: export from certutil (Root + CA stores)
       certs = execFileSync('powershell', [
         '-NoProfile', '-Command',
         `@('Root','CA') | ForEach-Object {
@@ -59,9 +71,9 @@ export function loadSystemCAs(): void {
           }
         }`,
       ], { encoding: 'utf-8', timeout: 15_000 });
+      logger.debug('[TLS] Exported system CAs from Windows certificate store.');
 
     } else {
-      // Linux: check common CA bundle locations
       const linuxPaths = [
         '/etc/ssl/certs/ca-certificates.crt',
         '/etc/pki/tls/certs/ca-bundle.crt',
@@ -72,9 +84,11 @@ export function loadSystemCAs(): void {
         if (fs.existsSync(p)) {
           process.env.NODE_EXTRA_CA_CERTS = p;
           extraCAs = fs.readFileSync(p, 'utf-8');
+          logger.debug(`[TLS] Using Linux CA bundle: ${p}`);
           return;
         }
       }
+      logger.debug('[TLS] No Linux CA bundle found at standard paths.');
     }
 
     if (certs && certs.length > 100) {
@@ -82,22 +96,25 @@ export function loadSystemCAs(): void {
       const caFile = path.join(os.tmpdir(), `devspaces-cas-${crypto.randomBytes(8).toString('hex')}.pem`);
       fs.writeFileSync(caFile, certs, { mode: 0o600 });
       process.env.NODE_EXTRA_CA_CERTS = caFile;
+      const certCount = (certs.match(/-----BEGIN CERTIFICATE-----/g) || []).length;
+      logger.debug(`[TLS] Wrote ${certCount} system CAs to ${caFile}`);
     }
-  } catch {
-    // Best-effort — system CAs will be used as fallback
+  } catch (err) {
+    logger.debug(`[TLS] System CA export failed: ${err instanceof Error ? err.message : err}`);
   }
-
 }
 
 /**
  * Get an HTTPS agent that trusts both Node's built-in roots AND the
- * extra CAs we loaded (system CAs).
+ * extra CAs we loaded (bundled CAs, or system CAs as fallback).
  *
  * Use this for all HTTPS requests in the extension to ensure enterprise
  * CAs are trusted regardless of whether NODE_EXTRA_CA_CERTS took effect.
  */
 export function getHttpsAgent(): https.Agent {
   const ca = buildCAList();
+  const logger = Logger.getInstance();
+  logger.debug(`[TLS] HTTPS agent created with ${ca.length} total CA certs (${tls.rootCertificates.length} Node built-in + ${ca.length - tls.rootCertificates.length} extra).`);
   return new https.Agent({ ca });
 }
 
@@ -108,7 +125,6 @@ function buildCAList(): (string | Buffer)[] {
   const cas: (string | Buffer)[] = [...tls.rootCertificates];
 
   if (extraCAs) {
-    // Split PEM bundle into individual certs
     const certs = extraCAs.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g);
     if (certs) {
       cas.push(...certs);

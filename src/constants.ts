@@ -14,9 +14,6 @@ export const DW_API_GROUP = 'workspace.devfile.io';
 export const DW_API_VERSION = 'v1alpha2';
 export const DW_PLURAL = 'devworkspaces';
 
-/** Namespace labels used to discover user workspaces namespaces */
-export const WORKSPACE_NAMESPACE_LABEL = 'app.kubernetes.io/component=workspaces-namespace';
-
 /** Workspace phases */
 export enum WorkspacePhase {
   Starting = 'Starting',
@@ -34,13 +31,12 @@ export const CONFIG_LOG_LEVEL = 'logLevel';
 /** Context keys set on the VS Code context for when-clause evaluation */
 export const CTX_AUTHENTICATED = 'devspaces.authenticated';
 export const CTX_CONNECTED = 'devspaces.connected';
-export const CTX_INITIALIZING = 'devspaces.initializing';
 
 /** GlobalState keys */
 export const STATE_CLUSTER_URL = 'devspaces.clusterUrl';
 export const STATE_CLUSTER_DISPLAY_URL = 'devspaces.clusterDisplayUrl';
-export const STATE_CACHED_TOKEN = 'devspaces.cachedAccessToken';
 export const STATE_ACTIVE_CONNECTION = 'devspaces.activeConnection';
+export const STATE_CONNECTIONS_MAP = 'devspaces.connectionsMap';
 
 /** K8s label keys */
 export const LABEL_DEVWORKSPACE_ID = 'controller.devfile.io/devworkspace_id';

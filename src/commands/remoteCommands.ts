@@ -5,8 +5,10 @@ import { Logger } from '../util/Logger';
 import { TokenManager } from '../auth/TokenManager';
 import { ClusterDiscovery } from '../auth/ClusterDiscovery';
 import { KubeClientFactory } from '../kubernetes/KubeClientFactory';
+import { KubeAuthHelper, findWorkspacePodAndContainer, getDevWorkspacePhase } from '../kubernetes/KubeAuthHelper';
+import { DevWorkspaceResource } from '../kubernetes/DevWorkspaceTypes';
 import { execOnPod } from '../kubernetes/execHelper';
-import { STATE_CACHED_TOKEN, SIDECAR_PREFIXES } from '../constants';
+import { SIDECAR_PREFIXES, DW_API_GROUP, DW_API_VERSION, DW_PLURAL } from '../constants';
 
 export interface ActiveConnectionInfo {
   workspaceName: string;
@@ -31,38 +33,21 @@ export function registerRemoteCommands(
   const tokenManager = new TokenManager(context.globalState);
   const clusterDiscovery = new ClusterDiscovery();
   const kubeClientFactory = new KubeClientFactory();
+  const authHelper = new KubeAuthHelper(tokenManager, clusterDiscovery, kubeClientFactory);
 
   async function getKubeConfig(): Promise<k8s.KubeConfig> {
-    let accessToken: string | undefined;
-    const storedToken = await tokenManager.getToken(conn.clusterUrl);
-    if (storedToken && tokenManager.isTokenValid(storedToken)) {
-      accessToken = storedToken.accessToken;
-    }
-    if (!accessToken) {
-      accessToken = context.globalState.get<string>(STATE_CACHED_TOKEN);
-    }
-    if (!accessToken) { throw new Error('Not authenticated — please sign in again.'); }
-    const endpoints = await clusterDiscovery.discover(conn.clusterUrl);
-    return kubeClientFactory.createConfig(endpoints.apiUrl, accessToken);
+    return authHelper.requireKubeConfig(conn.clusterUrl);
   }
 
   function getCustomApi(kc: k8s.KubeConfig): k8s.CustomObjectsApi {
     return kc.makeApiClient(k8s.CustomObjectsApi);
   }
 
-  const DW = { group: 'workspace.devfile.io', version: 'v1alpha2', plural: 'devworkspaces' };
-
   async function patchWorkspace(customApi: k8s.CustomObjectsApi, body: any[]): Promise<void> {
     await customApi.patchNamespacedCustomObject({
-      ...DW, namespace: conn.namespace, name: conn.workspaceName, body,
+      group: DW_API_GROUP, version: DW_API_VERSION, plural: DW_PLURAL,
+      namespace: conn.namespace, name: conn.workspaceName, body,
     });
-  }
-
-  async function getWorkspacePhase(customApi: k8s.CustomObjectsApi): Promise<string> {
-    const dw = await customApi.getNamespacedCustomObject({
-      ...DW, namespace: conn.namespace, name: conn.workspaceName,
-    }) as any;
-    return dw?.status?.phase ?? 'Unknown';
   }
 
   async function waitForPhase(
@@ -74,7 +59,7 @@ export function registerRemoteCommands(
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 3000));
-      const phase = await getWorkspacePhase(customApi);
+      const phase = await getDevWorkspacePhase(customApi, conn.namespace, conn.workspaceName);
       if (targetPhases.includes(phase)) { return phase; }
       if (failPhases.includes(phase)) {
         throw new Error(`Workspace entered ${phase} state`);
@@ -132,19 +117,7 @@ export function registerRemoteCommands(
         const kc = await getKubeConfig();
 
         // Find the pod and main container
-        const coreApi = kc.makeApiClient(k8s.CoreV1Api);
-        const podList = await coreApi.listNamespacedPod({
-          namespace: conn.namespace,
-          labelSelector: `controller.devfile.io/devworkspace_id=${conn.devworkspaceId}`,
-        });
-        if (podList.items.length === 0) { throw new Error('Workspace pod not found'); }
-        const pod = podList.items[0];
-        const podName = pod.metadata?.name ?? '';
-        const containers = pod.spec?.containers ?? [];
-        const mainContainer = containers.find(
-          (c) => !SIDECAR_PREFIXES.some((p) => c.name.startsWith(p))
-        ) ?? containers[0];
-        const containerName = mainContainer?.name ?? 'tools';
+        const { podName, containerName } = await findWorkspacePodAndContainer(kc, conn.namespace, conn.devworkspaceId);
 
         // Helper: exec a command on the pod
         const execCmd = (cmd: string) => execOnPod(kc, conn.namespace, podName, containerName, cmd);
@@ -198,8 +171,8 @@ export function registerRemoteCommands(
         // Get current DevWorkspace CR
         const api = getCustomApi(kc);
         const dw = await api.getNamespacedCustomObject({
-          ...DW, namespace: conn.namespace, name: conn.workspaceName,
-        }) as any;
+          group: DW_API_GROUP, version: DW_API_VERSION, namespace: conn.namespace, plural: DW_PLURAL, name: conn.workspaceName,
+        }) as DevWorkspaceResource;
 
         // Parse and merge
         const localDevfile = jsYaml.load(devfileContent) as Record<string, any>;
@@ -216,14 +189,13 @@ export function registerRemoteCommands(
           updatedTemplate.commands = localDevfile.commands;
         }
 
-        // Patch, stop, wait, start, wait, reload
+        // Patch template and restart — reload immediately, resolver handles the wait
         await patchWorkspace(api, [
           { op: 'replace', path: '/spec/template', value: updatedTemplate },
           { op: 'replace', path: '/spec/started', value: false },
         ]);
-        await waitForPhase(api, ['Stopped', 'Failed']);
+        // Start immediately (don't wait for Stopped — avoid status monitor race)
         await patchWorkspace(api, [{ op: 'replace', path: '/spec/started', value: true }]);
-        await waitForPhase(api, ['Running']);
         await vscode.commands.executeCommand('workbench.action.reloadWindow');
       } catch (err) {
         vscode.window.showErrorMessage(
@@ -238,6 +210,18 @@ export function registerRemoteCommands(
     vscode.commands.registerCommand('devspaces.openInDashboard', async () => {
       const dashboardUrl = `${conn.clusterUrl}/dashboard/#/workspaces`;
       await vscode.env.openExternal(vscode.Uri.parse(dashboardUrl));
+    })
+  );
+
+  // --- Open OpenShift Console ---
+  context.subscriptions.push(
+    vscode.commands.registerCommand('devspaces.openConsole', async () => {
+      const discovery = new ClusterDiscovery();
+      const appsDomain = discovery.extractAppsDomain(conn.clusterUrl);
+      const consoleUrl = appsDomain
+        ? `https://console-openshift-console.${appsDomain}`
+        : conn.clusterUrl;
+      await vscode.env.openExternal(vscode.Uri.parse(consoleUrl));
     })
   );
 

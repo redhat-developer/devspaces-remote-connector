@@ -64,6 +64,21 @@ module.exports = (_env, argv) => {
       ],
     },
     plugins: [
+      // Inject build commit hash at compile time
+      new webpack.DefinePlugin({
+        BUILD_COMMIT: JSON.stringify(
+          process.env.CI_COMMIT_SHORT_SHA ||
+          (() => {
+            try {
+              return require('child_process')
+                .execSync('git rev-parse --short HEAD', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] })
+                .trim();
+            } catch {
+              return 'dev';
+            }
+          })()
+        ),
+      }),
       // Shim `navigator` before any module code runs.
       new webpack.BannerPlugin({
         banner: `try{Object.defineProperty(globalThis,"navigator",{value:{userAgent:"node"},writable:true,configurable:true});}catch(e){}`,

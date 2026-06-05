@@ -5,7 +5,7 @@ import { WorkspaceTreeProvider } from '../ui/WorkspaceTreeProvider';
 import { ClusterTreeItem } from '../ui/WorkspaceTreeItem';
 import { TokenManager } from '../auth/TokenManager';
 import { OpenShiftAuthProvider } from '../auth/OpenShiftAuthProvider';
-import { STATE_CLUSTER_URL, STATE_CLUSTER_DISPLAY_URL, STATE_CACHED_TOKEN, STATE_ACTIVE_CONNECTION, CTX_AUTHENTICATED, CTX_CONNECTED } from '../constants';
+import { STATE_CLUSTER_URL, STATE_CLUSTER_DISPLAY_URL, STATE_ACTIVE_CONNECTION, CTX_AUTHENTICATED, CTX_CONNECTED } from '../constants';
 
 export interface ClusterCommandsDeps {
   context: vscode.ExtensionContext;
@@ -133,7 +133,6 @@ export function registerClusterCommands(deps: ClusterCommandsDeps): void {
           for (const session of sessions) {
             await authProvider.removeSession(session.id);
           }
-          await context.globalState.update(STATE_CACHED_TOKEN, undefined);
           await context.globalState.update(STATE_ACTIVE_CONNECTION, undefined);
           if (tp) { tp.setClusters([]); }
           await vscode.commands.executeCommand('setContext', CTX_AUTHENTICATED, false);
@@ -147,5 +146,61 @@ export function registerClusterCommands(deps: ClusterCommandsDeps): void {
         );
       }
     )
+  );
+
+  // --- Sign In to Cluster (re-auth after sign-out) ---
+  context.subscriptions.push(
+    vscode.commands.registerCommand('devspaces.signInCluster', async (item?: ClusterTreeItem) => {
+      if (!item?.cluster) { return; }
+      try {
+        await authProvider.createSession([]);
+        await initCluster(item.cluster.id, item.cluster.devSpacesUrl);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!msg.includes('cancelled')) {
+          vscode.window.showErrorMessage(`Sign-in failed: ${msg}`);
+        }
+      }
+    })
+  );
+
+  // --- Sign Out from Cluster ---
+  context.subscriptions.push(
+    vscode.commands.registerCommand('devspaces.signOutCluster', async (item?: ClusterTreeItem) => {
+      let cluster = item?.cluster;
+      if (!cluster) {
+        const clusters = clusterManager.getClusters();
+        if (clusters.length === 0) { return; }
+        if (clusters.length === 1) { cluster = clusters[0]; }
+        else {
+          const picked = await vscode.window.showQuickPick(
+            clusters.map((c) => ({ label: c.displayName, description: c.devSpacesUrl, cluster: c })),
+            { placeHolder: 'Select a cluster to sign out from', ignoreFocusOut: true }
+          );
+          if (!picked) { return; }
+          cluster = picked.cluster;
+        }
+      }
+
+      await tokenManager.deleteToken(cluster.devSpacesUrl);
+      await tokenManager.deleteToken(cluster.id);
+      await tokenManager.deleteToken(cluster.appsDomain);
+
+      const wm = clusterWorkspaceManagers.get(cluster.id);
+      if (wm) {
+        wm.dispose();
+        clusterWorkspaceManagers.delete(cluster.id);
+      }
+      const interval = refreshIntervals.get(cluster.id);
+      if (interval) {
+        clearInterval(interval);
+        refreshIntervals.delete(cluster.id);
+      }
+
+      const tp = treeProvider();
+      if (tp) { tp.setClusterSignedOut(cluster.id); }
+
+      vscode.window.showInformationMessage(`Signed out from "${cluster.displayName}". Click the cluster to sign in again.`);
+    })
   );
 }

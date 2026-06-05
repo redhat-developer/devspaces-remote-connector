@@ -7,12 +7,10 @@ import { WorkspaceManager } from '../workspace/WorkspaceManager';
 import { WorkspaceTreeProvider } from '../ui/WorkspaceTreeProvider';
 import { StatusBarManager } from '../ui/StatusBarManager';
 import {
-  AUTH_PROVIDER_ID,
   CTX_AUTHENTICATED,
   CTX_CONNECTED,
   STATE_CLUSTER_URL,
   STATE_CLUSTER_DISPLAY_URL,
-  STATE_CACHED_TOKEN,
   STATE_ACTIVE_CONNECTION,
 } from '../constants';
 
@@ -41,46 +39,35 @@ export function registerAuthCommands(deps: AuthCommandsDeps): void {
   context.subscriptions.push(
     vscode.commands.registerCommand('devspaces.signIn', async () => {
       try {
-        await vscode.authentication.getSession(AUTH_PROVIDER_ID, [], {
-          createIfNone: true,
-        });
+        // If no cluster configured, prompt for URL first
+        const clusters = clusterManager.getClusters();
+        if (clusters.length === 0) {
+          const url = await vscode.window.showInputBox({
+            prompt: 'Enter your Dev Spaces cluster URL',
+            placeHolder: 'https://devspaces.apps.your-cluster.example.com',
+            ignoreFocusOut: true,
+            validateInput: (value) => {
+              const trimmed = value.trim();
+              if (!trimmed) { return 'Please enter a URL'; }
+              const toValidate = trimmed.startsWith('http') ? trimmed : `https://${trimmed}`;
+              try { new URL(toValidate); return undefined; } catch { return 'Please enter a valid URL'; }
+            },
+          });
+          if (!url) { return; }
+          const entry = await clusterManager.addCluster(url.trim());
+          context.globalState.update(STATE_CLUSTER_URL, entry.devSpacesUrl);
+        }
+
+        // Trigger sign-in directly (bypasses VS Code consent dialog)
+        await authProvider.createSession([]);
         await loadAllClusters();
         vscode.window.showInformationMessage('Signed in to Dev Spaces');
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        vscode.window.showErrorMessage(`Sign-in failed: ${msg}`);
+        if (!msg.includes('cancelled')) {
+          vscode.window.showErrorMessage(`Sign-in failed: ${msg}`);
+        }
         logger.error(`Sign-in failed: ${msg}`);
-      }
-    })
-  );
-
-  // --- Sign Out ---
-  context.subscriptions.push(
-    vscode.commands.registerCommand('devspaces.signOut', async () => {
-      try {
-        const sessions = await authProvider.getSessions();
-        for (const session of sessions) {
-          await authProvider.removeSession(session.id);
-        }
-        for (const wm of clusterWorkspaceManagers.values()) {
-          wm.dispose();
-        }
-        clusterWorkspaceManagers.clear();
-        for (const interval of refreshIntervals.values()) {
-          clearInterval(interval);
-        }
-        refreshIntervals.clear();
-        const tp = treeProvider();
-        if (tp) {
-          tp.setClusters(clusterManager.getClusters());
-          for (const c of clusterManager.getClusters()) {
-            tp.setWorkspaces(c.id, []);
-          }
-        }
-        statusBar.setDisconnected();
-        vscode.window.showInformationMessage('Signed out of Dev Spaces');
-      } catch (err) {
-        logger.error(`Sign-out failed: ${err}`);
       }
     })
   );
@@ -119,8 +106,8 @@ export function registerAuthCommands(deps: AuthCommandsDeps): void {
         // Clear globalState
         await context.globalState.update(STATE_CLUSTER_URL, undefined);
         await context.globalState.update(STATE_CLUSTER_DISPLAY_URL, undefined);
-        await context.globalState.update(STATE_CACHED_TOKEN, undefined);
         await context.globalState.update(STATE_ACTIVE_CONNECTION, undefined);
+        await context.globalState.update('devspaces.connectionsMap', undefined);
 
         // Remove clusters
         for (const cluster of clusters) {

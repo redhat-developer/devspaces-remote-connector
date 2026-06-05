@@ -17,7 +17,7 @@ export interface ServerInstallResult {
   arch: string;
 }
 
-export class ServerInstallError extends Error {
+class ServerInstallError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'ServerInstallError';

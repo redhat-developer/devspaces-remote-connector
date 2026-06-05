@@ -67,12 +67,25 @@ export class WorkspaceTreeItem extends vscode.TreeItem {
 export class ClusterTreeItem extends vscode.TreeItem {
   constructor(
     public readonly cluster: ClusterEntry,
-    childCount: number
+    childCount: number,
+    isLoading = false,
+    isSignedOut = false
   ) {
-    super(cluster.displayName, vscode.TreeItemCollapsibleState.Expanded);
-    this.description = `${childCount} workspace${childCount !== 1 ? 's' : ''}`;
-    this.iconPath = new vscode.ThemeIcon('cloud');
-    this.contextValue = 'cluster';
+    super(cluster.displayName, isSignedOut ? vscode.TreeItemCollapsibleState.None : vscode.TreeItemCollapsibleState.Expanded);
+    if (isSignedOut) {
+      this.description = 'signed out';
+      this.iconPath = new vscode.ThemeIcon('cloud', new vscode.ThemeColor('disabledForeground'));
+      this.contextValue = 'cluster-signed-out';
+      this.command = { command: 'devspaces.signInCluster', title: 'Sign In', arguments: [this] };
+    } else if (isLoading) {
+      this.description = 'loading...';
+      this.iconPath = new vscode.ThemeIcon('loading~spin');
+      this.contextValue = 'cluster';
+    } else {
+      this.description = `${childCount} workspace${childCount !== 1 ? 's' : ''}`;
+      this.iconPath = new vscode.ThemeIcon('cloud');
+      this.contextValue = 'cluster';
+    }
     this.tooltip = new vscode.MarkdownString(
       `**${cluster.displayName}**\n\n` +
       `- **URL:** ${cluster.devSpacesUrl}\n`

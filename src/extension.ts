@@ -1,8 +1,11 @@
 import * as vscode from 'vscode';
 import { Logger } from './util/Logger';
-import { extractWorkspaceName } from './util/workspaceNameExtractor';
+import { extractWorkspaceName, parseHostAlias } from './util/workspaceNameExtractor';
 import { OpenShiftAuthProvider } from './auth/OpenShiftAuthProvider';
 import { TokenManager } from './auth/TokenManager';
+
+/** Git commit SHA injected at build time by webpack DefinePlugin */
+declare const BUILD_COMMIT: string;
 import { OAuthFlow } from './auth/OAuthFlow';
 import { ClusterDiscovery } from './auth/ClusterDiscovery';
 import { KubeClientFactory } from './kubernetes/KubeClientFactory';
@@ -11,7 +14,7 @@ import { WorkspaceTreeItem } from './ui/WorkspaceTreeItem';
 import { StatusBarManager } from './ui/StatusBarManager';
 import { ClusterManager } from './cluster/ClusterManager';
 import { ClusterSessionManager } from './cluster/ClusterSessionManager';
-import { DevSpacesResolver, WorkspaceConnectionInfo } from './remote/DevSpacesResolver';
+import { DevSpacesResolver } from './remote/DevSpacesResolver';
 import { createGetKubeConfig, createFindPodAndContainer, createCheckAndStartWorkspace } from './remote/resolverCallbacks';
 import { registerRemoteCommands, ActiveConnectionInfo } from './commands/remoteCommands';
 import { registerWorkspaceCommands } from './commands/workspaceCommands';
@@ -35,6 +38,17 @@ export async function activate(
 ): Promise<void> {
   logger = Logger.getInstance();
   logger.info('Dev Spaces Connector activating...');
+
+  // Log extension version and build info for diagnostics
+  const ext = vscode.extensions.getExtension('devspaces.devspaces-connector');
+  const version = ext?.packageJSON?.version ?? 'unknown';
+  logger.info(`[Version] ${version} (${BUILD_COMMIT})`);
+
+  // Log IDE detection at startup
+  const { detectIDE } = await import('./util/IDEDetector');
+  const ide = detectIDE();
+  logger.info(`[IDE Detection] isVSCode=${ide.isVSCode}, isOSS=${ide.isOSS}, isVSCodium=${ide.isVSCodium}, isUnknownFork=${ide.isUnknownFork}, isKiro=${ide.isKiro}`);
+  logger.info(`[IDE Detection] App Name: ${vscode.env.appName}, URI Scheme: ${vscode.env.uriScheme}`);
 
   loadSystemCAs();
 
@@ -77,9 +91,37 @@ function registerResolver(context: vscode.ExtensionContext): void {
     const resolverKubeFactory = new KubeClientFactory();
     const resolverClusterDiscovery = new ClusterDiscovery();
 
+    const resolverClusterManager = new ClusterManager(context.globalState);
+
     const resolver = new DevSpacesResolver(
       context,
-      async () => context.globalState.get<WorkspaceConnectionInfo>('devspaces.activeConnection'),
+      async (hostAlias: string) => {
+        // Try connections map first (supports multiple recent workspaces)
+        const connectionsMap = context.globalState.get<Record<string, any>>('devspaces.connectionsMap', {});
+        if (connectionsMap[hostAlias]) { return connectionsMap[hostAlias]; }
+        // Fallback: parse clusterId from hostAlias and construct minimal connection info
+        const parsed = parseHostAlias(hostAlias);
+        if (parsed) {
+          const clusters = resolverClusterManager.getClusters();
+          const cluster = clusters.find((c) => c.id === parsed.clusterId)
+            ?? clusters.find((c) => {
+              // Match by apps domain prefix (e.g. devspc-1d from apps.devspc-1d.ctyz...)
+              if (!c.appsDomain) { return false; }
+              const prefix = c.appsDomain.replace(/^apps\./, '').split('.')[0];
+              return prefix === parsed.clusterId;
+            });
+          if (cluster) {
+            return {
+              workspaceName: parsed.workspaceName,
+              namespace: cluster.namespace ?? '',
+              devworkspaceId: '',
+              hostAlias,
+              clusterUrl: cluster.devSpacesUrl,
+            };
+          }
+        }
+        return undefined;
+      },
       createGetKubeConfig(context.globalState, resolverTokenManager, resolverKubeFactory, resolverClusterDiscovery),
       createFindPodAndContainer(),
       createCheckAndStartWorkspace(context.globalState, resolverTokenManager, resolverKubeFactory, resolverClusterDiscovery)
@@ -103,6 +145,18 @@ function setupRemoteSession(context: vscode.ExtensionContext, effectiveRemote: s
   logger.info(`Running in remote session: ${effectiveRemote}`);
   vscode.commands.executeCommand('setContext', CTX_CONNECTED, true);
   vscode.commands.executeCommand('setContext', 'devspaces.isRemoteSession', true);
+
+  // Register auth provider so re-auth works in remote window
+  const tokenManager = new TokenManager(context.globalState);
+  const oauthFlow = new OAuthFlow();
+  const clusterDiscovery = new ClusterDiscovery();
+  const authProvider = new OpenShiftAuthProvider(context, tokenManager, oauthFlow, clusterDiscovery);
+  context.subscriptions.push(
+    vscode.authentication.registerAuthenticationProvider(
+      AUTH_PROVIDER_ID, AUTH_PROVIDER_LABEL, authProvider,
+      { supportsMultipleAccounts: false }
+    )
+  );
 
   const remoteAuthority = process.env.VSCODE_REMOTE_AUTHORITY ?? '';
   const workspaceName = extractWorkspaceName(remoteAuthority);

@@ -21,7 +21,7 @@ eslint.config.js
 **/*.har
 **/*.vsix
 **/*.zip
-delta-devspaces-connector-*/**
+devspaces-connector-*/**
 tmp_*.py
 CASE_SENSITIVITY_FIX.md
 NAMESPACE_DISCOVERY_FIX.md
