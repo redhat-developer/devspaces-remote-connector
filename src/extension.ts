@@ -50,6 +50,10 @@ export async function activate(
   logger.info(`[IDE Detection] isVSCode=${ide.isVSCode}, isOSS=${ide.isOSS}, isVSCodium=${ide.isVSCodium}, isUnknownFork=${ide.isUnknownFork}, isKiro=${ide.isKiro}`);
   logger.info(`[IDE Detection] App Name: ${vscode.env.appName}, URI Scheme: ${vscode.env.uriScheme}`);
 
+  if (!vscode.workspace.getConfiguration('devspaces').get('certificateValidation.enabled', true)) {
+    process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+  }
+
   loadSystemCAs();
 
   // --- Set IDE detection context ---

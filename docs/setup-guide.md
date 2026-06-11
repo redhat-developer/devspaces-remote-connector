@@ -6,7 +6,7 @@ A comprehensive guide to installing, configuring, and using the Dev Spaces Conne
 
 | Requirement | Details |
 |---|---|
-| **IDE** | Kiro IDE or VS Code 1.85+ |
+| **IDE** | Kiro IDE or VS Code 1.107+ |
 | **Network access** | Direct HTTPS connectivity to your OpenShift Dev Spaces cluster |
 | **Credentials** | OpenShift SSO credentials (the extension authenticates via browser-based OAuth2) |
 
@@ -141,6 +141,7 @@ All settings are under the `devspaces` namespace.
 | `devspaces.initialization.timeout` | `number` | `120` | Max seconds to wait for namespace initialization. |
 | `devspaces.initialization.pollInterval` | `number` | `2` | Poll interval (seconds) for readiness check. |
 | `devspaces.initialization.namespaceAgeThreshold` | `number` | `300` | Namespace age threshold (seconds). Set to 0 to always check. |
+| `devspaces.certificateValidation.enabled` | `true` | Whether to reject cluster SSL/TLS certificates that are invalid, expired or self-signed. |
 
 ## Commands
 

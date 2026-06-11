@@ -24,7 +24,7 @@ Connect to [Red Hat OpenShift Dev Spaces](https://developers.redhat.com/products
 
 ## Prerequisites
 
-- **Kiro IDE** or **VS Code 1.85+**
+- **Kiro IDE** or **VS Code 1.107+**
 - Network access to your OpenShift Dev Spaces cluster
 - OpenShift credentials (SSO)
 
@@ -32,14 +32,22 @@ Connect to [Red Hat OpenShift Dev Spaces](https://developers.redhat.com/products
 
 | Setting | Default | Description |
 |---|---|---|
-| `devspaces.clusters` | `[]` | Dev Spaces cluster URLs. Auto-populated on sign-in. |
+| `devspaces.clusters` | `[]` | List of Dev Spaces cluster URLs. First entry is the default. |
+| `devspaces.syncKiroIDECredentials` | `true` | Sync Kiro IDE AWS SSO credentials to remote workspace (Kiro only). |
 | `devspaces.autoConnect` | `false` | Auto-connect to last workspace on startup. |
 | `devspaces.autoOpenFolder` | `true` | Auto-open project folder after connecting. |
-| `devspaces.rehDownloadUrl` | `""` | Custom REH server download URL template. |
+| `devspaces.rehDownloadUrl` | `""` | URL template for REH server download. Supports `${commit}`, `${os}`, `${arch}`. If empty, uses IDE built-in. |
 | `devspaces.connectionTimeout` | `300` | Max seconds to wait for workspace start. |
 | `devspaces.reconnect.enabled` | `true` | Auto-reconnect on connection loss. |
+| `devspaces.reconnect.maxRetries` | `5` | Max reconnection attempts. |
 | `devspaces.logLevel` | `"info"` | Logging verbosity: `debug`, `info`, `warn`, `error`. |
 | `devspaces.openBehavior` | `"newWindow"` | How to open remote sessions: `newWindow`, `currentWindow`, `prompt`. |
+| `devspaces.hideRemoteExplorer` | `true` | Hide the Remote-SSH explorer sidebar. |
+| `devspaces.initialization.roleBindingName` | `"devspaces-user-container-build"` | RoleBinding to wait for during namespace init. |
+| `devspaces.initialization.timeout` | `120` | Max seconds to wait for namespace initialization. |
+| `devspaces.initialization.pollInterval` | `2` | Poll interval (seconds) for readiness check. |
+| `devspaces.initialization.namespaceAgeThreshold` | `300` | Namespace age threshold (seconds). Set to 0 to always check. |
+| `devspaces.certificateValidation.enabled` | `true` | Whether to reject cluster SSL/TLS certificates that are invalid, expired or self-signed. |
 
 ## Commands
 

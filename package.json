@@ -454,6 +454,11 @@
           "type": "number",
           "default": 300,
           "description": "Namespace age threshold in seconds. Namespaces newer than this trigger the initialization check."
+        },
+        "devspaces.certificateValidation.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether to reject cluster SSL/TLS certificates that are invalid, expired or self-signed."
         }
       }
     }
