@@ -11,6 +11,7 @@ Connect to [Red Hat OpenShift Dev Spaces](https://developers.redhat.com/products
 - **Auto-reconnect** — Automatically reconnects when pods are rescheduled or restarted.
 - **Port forwarding** — Access ports running in the workspace from localhost.
 - **IDE detection** — Automatically adapts to Kiro IDE or VS Code with appropriate defaults.
+- **Air-gapped support** — Handles connecting to cluster with restricted network traffic.
 
 ## Getting Started
 

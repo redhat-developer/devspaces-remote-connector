@@ -1,5 +1,8 @@
 import * as crypto from 'crypto';
 import * as stream from 'stream';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import * as k8s from '@kubernetes/client-node';
 import { Logger } from '../util/Logger';
 import { ServerConfig } from './ServerConfig';
@@ -22,6 +25,11 @@ class ServerInstallError extends Error {
     super(message);
     this.name = 'ServerInstallError';
   }
+}
+
+interface TransferRequest {
+  downloadUrl: string;
+  destFile: string;
 }
 
 /**
@@ -55,8 +63,8 @@ export async function installServerViaExec(
 
   logger.info(`Installing REH server on ${podName}/${containerName} via K8s exec`);
 
-  // Execute the install script via K8s exec
-  const output = await execInPod(
+  // Execute the install script via K8s exec with monitoring for transfer requests
+  const output = await execInPodWithMonitoring(
     kubeConfig,
     namespace,
     podName,
@@ -105,6 +113,7 @@ export async function installServerViaExec(
 /**
  * Execute a command in a pod container and return stdout.
  */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 async function execInPod(
   kubeConfig: k8s.KubeConfig,
   namespace: string,
@@ -154,6 +163,225 @@ async function execInPod(
         }
       )
       .catch(reject);
+  });
+}
+
+/**
+ * Execute a command in a pod and monitor stdout for transfer requests.
+ * When a transfer request is detected, initiates client-side download and upload.
+ */
+async function execInPodWithMonitoring(
+  kubeConfig: k8s.KubeConfig,
+  namespace: string,
+  podName: string,
+  containerName: string,
+  command: string[]
+): Promise<string> {
+  const logger = Logger.getInstance();
+  const exec = new k8s.Exec(kubeConfig);
+  let stdout = '';
+  let stderr = '';
+  let transferHandled = false;
+
+  const stdoutStream = new stream.Writable({
+    write(chunk: Buffer, _encoding, callback) {
+      const text = chunk.toString();
+      stdout += text;
+
+      // Check for transfer request in real-time (only handle once)
+      if (!transferHandled &&
+          stdout.includes('__DEVSPACES_TRANSFER_REQUEST__') &&
+          stdout.includes('__DEVSPACES_TRANSFER_END__')) {
+        transferHandled = true;
+        const request = parseTransferRequest(stdout);
+        if (request) {
+          logger.info('Transfer request detected, initiating client download...');
+          // Trigger download asynchronously while script continues
+          handleClientDownload(
+            kubeConfig, namespace, podName, containerName, request
+          ).catch(err => logger.error(`Client download failed: ${err}`));
+        }
+      }
+
+      callback();
+    },
+  });
+
+  const stderrStream = new stream.Writable({
+    write(chunk: Buffer, _encoding, callback) {
+      stderr += chunk.toString();
+      callback();
+    },
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    exec.exec(
+      namespace, podName, containerName, command,
+      stdoutStream, stderrStream, null, false,
+      (status: k8s.V1Status) => {
+        if (status.status === 'Success') {
+          resolve();
+        } else {
+          reject(new ServerInstallError(
+            `Exec failed: ${status.message ?? stderr.trim()}`
+          ));
+        }
+      }
+    ).catch(reject);
+  });
+
+  return stdout;
+}
+
+/**
+ * Parse transfer request markers from script output.
+ */
+function parseTransferRequest(output: string): TransferRequest | null {
+  const startIdx = output.indexOf('__DEVSPACES_TRANSFER_REQUEST__');
+  const endIdx = output.indexOf('__DEVSPACES_TRANSFER_END__');
+
+  if (startIdx < 0 || endIdx < 0) return null;
+
+  const block = output.substring(startIdx, endIdx);
+  const lines = block.split(/\r?\n/);
+
+  let downloadUrl = '';
+  let destFile = '';
+
+  for (const line of lines) {
+    if (line.startsWith('downloadUrl==')) {
+      downloadUrl = line.substring(13).replace(/==$/, '');
+    }
+    if (line.startsWith('destFile==')) {
+      destFile = line.substring(10).replace(/==$/, '');
+    }
+  }
+
+  return downloadUrl && destFile ? { downloadUrl, destFile } : null;
+}
+
+/**
+ * Download tarball from URL and upload to pod using k8s.Cp.
+ */
+async function handleClientDownload(
+  kubeConfig: k8s.KubeConfig,
+  namespace: string,
+  podName: string,
+  containerName: string,
+  request: TransferRequest
+): Promise<void> {
+  const logger = Logger.getInstance();
+  logger.info(`Client-side download: ${request.downloadUrl}`);
+
+  // Download to temp directory
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'devspaces-'));
+  const localFile = path.join(tempDir, 'vscode-server.tar.gz');
+
+  try {
+    await downloadFile(request.downloadUrl, localFile);
+    logger.info(`Downloaded tarball (${(fs.statSync(localFile).size / 1024 / 1024).toFixed(1)} MB)`);
+
+    await uploadViaStreaming(
+      kubeConfig, namespace, podName, containerName,
+      localFile, request.destFile
+    );
+
+    logger.info(`Uploaded to ${podName}:${request.destFile}`);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Upload file to pod using stdin streaming.
+ * Streams binary data directly - much faster than chunking.
+ */
+async function uploadViaStreaming(
+  kubeConfig: k8s.KubeConfig,
+  namespace: string,
+  podName: string,
+  containerName: string,
+  localFile: string,
+  destFile: string
+): Promise<void> {
+  const logger = Logger.getInstance();
+  const fileSize = fs.statSync(localFile).size;
+  logger.info(`Uploading file via stdin streaming (${(fileSize / 1024 / 1024).toFixed(1)} MB)`);
+
+  const exec = new k8s.Exec(kubeConfig);
+  const readStream = fs.createReadStream(localFile);
+  let stderr = '';
+
+  const stderrStream = new stream.Writable({
+    write(chunk: Buffer, _encoding, callback) {
+      stderr += chunk.toString();
+      callback();
+    },
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    exec.exec(
+      namespace,
+      podName,
+      containerName,
+      ['sh', '-c', `cat > ${destFile}`],
+      null,  // stdout - not needed
+      stderrStream,
+      readStream,  // stdin - stream the file
+      false,  // tty
+      (status: k8s.V1Status) => {
+        if (status.status === 'Success') {
+          resolve();
+        } else {
+          reject(new ServerInstallError(
+            `Upload failed: ${status.message ?? stderr.trim()}`
+          ));
+        }
+      }
+    ).catch(reject);
+  });
+
+  logger.info(`Upload complete`);
+}
+
+/**
+ * Download file from URL with redirect support.
+ */
+async function downloadFile(url: string, destPath: string): Promise<void> {
+  const https = await import('https');
+  const http = await import('http');
+
+  return new Promise((resolve, reject) => {
+    const protocol = url.startsWith('https') ? https : http;
+
+    protocol.get(url, (response) => {
+      // Follow redirects
+      if (response.statusCode === 301 || response.statusCode === 302) {
+        const location = response.headers.location;
+        if (!location) {
+          reject(new Error('Redirect without location header'));
+          return;
+        }
+        return downloadFile(location, destPath).then(resolve).catch(reject);
+      }
+
+      if (response.statusCode !== 200) {
+        reject(new Error(`Download failed: HTTP ${response.statusCode}`));
+        return;
+      }
+
+      const file = fs.createWriteStream(destPath);
+      response.pipe(file);
+
+      file.on('finish', () => {
+        file.close();
+        resolve();
+      });
+
+      file.on('error', (err) => {
+        fs.unlink(destPath, () => reject(err));
+      });
+    }).on('error', reject);
   });
 }
 
@@ -320,7 +548,28 @@ if [ ! -f "$SERVER_SCRIPT" ]; then
 
     if [ $? -ne 0 ]; then
         echo "Error downloading server from $SERVER_DOWNLOAD_URL"
-        print_install_results_and_exit 1
+        rm -f vscode-server.tar.gz
+
+        # Request client-side download as fallback
+        echo "__DEVSPACES_TRANSFER_REQUEST__"
+        echo "downloadUrl==$SERVER_DOWNLOAD_URL=="
+        echo "destFile==$SERVER_DIR/vscode-server.tar.gz=="
+        echo "__DEVSPACES_TRANSFER_END__"
+        echo "Waiting for client to upload tarball..."
+
+        # Poll for transferred file (up to 2 minutes)
+        for i in \$(seq 1 60); do
+            if [ -f "$SERVER_DIR/vscode-server.tar.gz" ]; then
+                echo "Client transfer complete"
+                break
+            fi
+            sleep 1s
+        done
+
+        if [ ! -f "$SERVER_DIR/vscode-server.tar.gz" ]; then
+            echo "Timeout waiting for client transfer"
+            print_install_results_and_exit 1
+        fi
     fi
 
     tar -xf vscode-server.tar.gz --strip-components 1
