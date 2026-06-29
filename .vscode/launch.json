@@ -10,7 +10,7 @@
         ],
         "name": "Launch Extension",
         "outFiles": [
-            "${workspaceFolder}/out/**/*.js"
+            "${workspaceFolder}/dist/**/*.js"
         ],
         "preLaunchTask": "npm: watch",
         "request": "launch",

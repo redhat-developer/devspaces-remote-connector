@@ -11,10 +11,9 @@ test/**
 .gitignore
 .DS_Store
 tsconfig.json
-webpack.config.js
+esbuild.js
 jest.config.js
 eslint.config.js
-.gitlab-ci.yml
 .eslintrc*
 **/*.ts
 **/*.map
