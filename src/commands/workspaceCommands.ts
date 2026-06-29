@@ -289,6 +289,7 @@ export function registerWorkspaceCommands(ctx: WorkspaceCommandContext): void {
               forceNewWindow = openBehavior !== 'currentWindow';
             }
 
+            await vscode.workspace.getConfiguration().update('terminal.integrated.defaultProfile.linux', 'bash', vscode.ConfigurationTarget.Global);
             const remoteUri = vscode.Uri.parse(`vscode-remote://${DEVSPACES_AUTHORITY}+${hostAlias}${projectFolder}`);
             logger.info(`Opening remote workspace: ${remoteUri.toString()} (newWindow: ${forceNewWindow})`);
             await vscode.commands.executeCommand('vscode.openFolder', remoteUri, { forceNewWindow });

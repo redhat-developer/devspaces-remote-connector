@@ -468,7 +468,14 @@ function generateInstallScript(opts: ScriptOptions): string {
 
 TMP_DIR="\${XDG_RUNTIME_DIR:-"/tmp"}"
 
-SERVER_DATA_DIR="$HOME/${opts.serverDataFolderName}"
+# Determine writable data directory (try $HOME first, fallback to /var/tmp/user/)
+if [ -w "$HOME" ]; then
+    SERVER_DATA_DIR="$HOME/${opts.serverDataFolderName}"
+else
+    echo "Warning: $HOME is not writable, using /var/tmp/user/ instead"
+    mkdir -p /var/tmp/user 2>/dev/null
+    SERVER_DATA_DIR="/var/tmp/user/${opts.serverDataFolderName}"
+fi
 
 DISTRO_VERSION="${opts.version}"
 DISTRO_COMMIT="${opts.commit}"
