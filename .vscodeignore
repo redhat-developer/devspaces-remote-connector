@@ -13,6 +13,7 @@ test/**
 tsconfig.json
 esbuild.js
 jest.config.js
+jest.setup.js
 eslint.config.js
 .eslintrc*
 **/*.ts
@@ -27,3 +28,4 @@ NAMESPACE_DISCOVERY_FIX.md
 FIX_SUMMARY.md
 ANALYSIS_VALIDATION.md
 scripts/**
+.github/

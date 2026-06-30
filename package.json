@@ -1,13 +1,15 @@
 {
-  "name": "devspaces-connector",
-  "displayName": "Dev Spaces Connector",
-  "description": "Connect to Red Hat OpenShift Dev Spaces workspaces with zero configuration. Manage workspace lifecycle, authenticate via OpenShift OAuth, and establish remote development sessions — all from a single extension.",
-  "version": "0.7.2",
-  "publisher": "devspaces",
+  "name": "devspaces-remote-connector",
+  "displayName": "Dev Spaces Local/Remote Support",
+  "description": "Connect to Red Hat OpenShift Dev Spaces workspaces with zero configuration. Manage workspace lifecycle, authenticate via OpenShift OAuth, and establish remote development sessions.",
+  "version": "0.8.0",
+  "author": "Red Hat",
+  "publisher": "redhat",
+  "icon": "images/devspaces-icon.png",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": ""
+    "url": "https://github.com/redhat-developer/devspaces-remote-connector"
   },
   "engines": {
     "node": ">=22.0.0",
@@ -467,6 +469,7 @@
     "vscode:prepublish": "npm run package",
     "prebuild": "node scripts/fetch-ca-bundle.js",
     "clean": "rm -rf out dist",
+    "prepare-pre-release": "node scripts/index.mjs prepare-pre-release",
     "compile": "npm run clean && node scripts/fetch-ca-bundle.js && node esbuild.js",
     "watch": "node scripts/fetch-ca-bundle.js && node esbuild.js --watch",
     "package": "node scripts/fetch-ca-bundle.js && node esbuild.js --production",
