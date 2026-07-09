@@ -40,7 +40,7 @@ export async function activate(
   logger.info('Dev Spaces Connector activating...');
 
   // Log extension version and build info for diagnostics
-  const ext = vscode.extensions.getExtension('devspaces.devspaces-connector');
+  const ext = vscode.extensions.getExtension('redhat.devspaces-remote-connector');
   const version = ext?.packageJSON?.version ?? 'unknown';
   logger.info(`[Version] ${version} (${BUILD_COMMIT})`);
 

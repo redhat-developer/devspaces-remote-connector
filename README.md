@@ -16,11 +16,12 @@ Connect to [Red Hat OpenShift Dev Spaces](https://developers.redhat.com/products
 ## Getting Started
 
 1. Install the extension (VSIX or marketplace)
-2. Click the **Dev Spaces** icon in the Activity Bar
-3. Click **Sign In to Dev Spaces**
-4. Enter your cluster URL (e.g. `https://devspaces.apps.your-cluster.example.com`)
-5. Authenticate in your browser
-6. Your workspaces appear — click **Connect** on any workspace
+2. Relaunch the IDE with `--enable-proposed-api redhat.devspaces-remote-connector` (See "Proposed API Access)
+3. Click the **Dev Spaces** icon in the Activity Bar
+4. Click **Sign In to Dev Spaces**
+5. Enter your cluster URL (e.g. `https://devspaces.apps.your-cluster.example.com`)
+6. Authenticate in your browser
+7. Your workspaces appear — click **Connect** on any workspace
 
 
 ## Prerequisites
@@ -28,6 +29,28 @@ Connect to [Red Hat OpenShift Dev Spaces](https://developers.redhat.com/products
 - **Kiro IDE** or **VS Code 1.107+**
 - Network access to your OpenShift Dev Spaces cluster
 - OpenShift credentials (SSO)
+
+### Proposed API Access
+
+This extension uses the VS Code `resolvers` proposed API for the remote authority resolver. To run it:
+
+**Option 1: Command-line flag**
+```bash
+kiro --enable-proposed-api redhat.devspaces-remote-connector
+# or for VS Code:
+code --enable-proposed-api redhat.devspaces-remote-connector
+```
+
+**Option 2: Runtime configuration arguments (argv.json)**
+
+Add the extension ID to the `enable-proposed-api` array in your IDE's extension installation folder, (eg. `$HOME/.vscode/argv.json`):
+```json
+{
+  "enable-proposed-api": [
+    "redhat.devspaces-remote-connector"
+  ]
+}
+```
 
 ## Extension Settings
 

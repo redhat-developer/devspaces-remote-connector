@@ -65,10 +65,10 @@ If neither is in place, the resolver silently won't activate and connections wil
 
 ```bash
 # Kiro IDE
-kiro --enable-proposed-api devspaces.devspaces-connector --extensionDevelopmentPath=.
+kiro --enable-proposed-api redhat.devspaces-remote-connector --extensionDevelopmentPath=.
 
 # VS Code
-code --enable-proposed-api devspaces.devspaces-connector --extensionDevelopmentPath=.
+code --enable-proposed-api redhat.devspaces-remote-connector --extensionDevelopmentPath=.
 ```
 
 ## Custom CA Certificates (Build-Time)
