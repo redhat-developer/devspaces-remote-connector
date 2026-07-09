@@ -14,6 +14,10 @@ export class WorkspaceTreeItem extends vscode.TreeItem {
     this.tooltip = this.buildTooltip();
     this.iconPath = this.getIcon();
     this.contextValue = `workspace-${workspace.phase.toLowerCase()}`;
+    this.command = {
+      command: 'devspaces.workspaceTreeItemDoubleClickHandler',
+      title: 'Workspace Tree Item Double Click Handler', arguments: [this]
+    };
   }
 
   private buildTooltip(): vscode.MarkdownString {

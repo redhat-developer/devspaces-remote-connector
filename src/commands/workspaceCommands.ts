@@ -357,6 +357,30 @@ export function registerWorkspaceCommands(ctx: WorkspaceCommandContext): void {
     })
   );
 
+  let lastClickedItem: string | undefined = undefined;
+  let clickTimer: NodeJS.Timeout | undefined = undefined;
+  const DOUBLE_CLICK_DELAY = 300;
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('devspaces.workspaceTreeItemDoubleClickHandler', async (item) => {
+      if (lastClickedItem === item.label) {
+        // double click
+        if (clickTimer) {
+          clearTimeout(clickTimer);
+        }
+        lastClickedItem = undefined;
+        vscode.commands.executeCommand('devspaces.connectWorkspace', item);
+      } else {
+        // single click
+        lastClickedItem = item.label;
+        clickTimer = setTimeout(() => {
+          // only single click
+          lastClickedItem = undefined;
+        }, DOUBLE_CLICK_DELAY);
+      }
+    })
+  );
+
   // ── Helper: create via dashboard ──────────────────────────────────
   async function createViaDashboard(factoryUrl: string, clusterId?: string): Promise<void> {
     let wm: WorkspaceManager;
