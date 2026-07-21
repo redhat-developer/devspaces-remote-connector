@@ -30,6 +30,7 @@ import {
 } from './constants';
 
 let logger: Logger;
+let oldConfig: vscode.WorkspaceConfiguration;
 let cleanupFn: (() => Promise<void>) | undefined;
 let cleanupIntervalsFn: (() => void) | undefined;
 
@@ -293,6 +294,28 @@ async function setupLocalSession(context: vscode.ExtensionContext): Promise<void
     if (!silent) {
       vscode.window.showInformationMessage('Disconnected from Dev Spaces');
     }
+  }
+
+  oldConfig = vscode.workspace.getConfiguration('devspaces');
+  context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(params => {
+    if (!params.affectsConfiguration('devspaces')) {
+      return;
+    }
+    const newConfig = vscode.workspace.getConfiguration('devspaces');
+
+    if (hasConfigKeyChanged('certificateValidation.enabled', oldConfig, newConfig)) {
+       process.env.NODE_TLS_REJECT_UNAUTHORIZED = newConfig.get('certificateValidation.enabled', true) ? '1' : '0';
+    }
+
+    oldConfig = newConfig;
+  }));
+
+  function hasConfigKeyChanged(key: string, oldConfig: vscode.WorkspaceConfiguration, newConfig: vscode.WorkspaceConfiguration) {
+    const oldValue = oldConfig.get(key);
+    const newValue = newConfig.get(key);
+    return Array.isArray(oldValue) && Array.isArray(newValue)
+      ? JSON.stringify(oldValue) !== JSON.stringify(newValue)
+      : oldValue !== newValue;
   }
 
   cleanupFn = () => cleanupConnection(true);
