@@ -64,7 +64,16 @@ export function registerAuthCommands(deps: AuthCommandsDeps): void {
         vscode.window.showInformationMessage('Signed in to Dev Spaces');
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        if (!msg.includes('cancelled')) {
+        if (msg.includes('self signed certificate in certificate chain')) {
+          vscode.window.showErrorMessage(`
+            Failed to authenticate because a certificate in the chain appears to be self signed.
+            Unset 'devspaces.certificateValidation.enabled' setting to bypass.`, 'Open Settings'
+          ).then(resp => {
+            if (resp === 'Open Settings') {
+              vscode.commands.executeCommand('workbench.action.openSettings', 'devspaces.certificateValidation.enabled');
+            }
+          })
+        } else if (!msg.includes('cancelled')) {
           vscode.window.showErrorMessage(`Sign-in failed: ${msg}`);
         }
         logger.error(`Sign-in failed: ${msg}`);
