@@ -51,3 +51,6 @@ export const TOKEN_REFRESH_BUFFER = 300_000; // Refresh 5 minutes before expiry
 
 /** Projects root inside workspace pods */
 export const PROJECTS_ROOT = '/projects';
+
+/** Remote workspace port on which machine-exec listens */
+export const MACHINE_EXEC_PORT = 3333;

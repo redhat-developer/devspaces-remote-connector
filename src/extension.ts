@@ -7,7 +7,7 @@ import { TokenManager } from './auth/TokenManager';
 /** Git commit SHA injected at build time by webpack DefinePlugin */
 declare const BUILD_COMMIT: string;
 import { OAuthFlow } from './auth/OAuthFlow';
-import { ClusterDiscovery } from './auth/ClusterDiscovery';
+import { ClusterDiscovery, ClusterEndpoints } from './auth/ClusterDiscovery';
 import { KubeClientFactory } from './kubernetes/KubeClientFactory';
 import { WorkspaceTreeProvider } from './ui/WorkspaceTreeProvider';
 import { WorkspaceTreeItem } from './ui/WorkspaceTreeItem';
@@ -27,7 +27,12 @@ import {
   CTX_CONNECTED,
   STATE_ACTIVE_CONNECTION,
   DEVSPACES_AUTHORITY,
+  LABEL_DEVWORKSPACE_ID,
+  MACHINE_EXEC_PORT,
 } from './constants';
+import { ActivityTrackerService } from './remote/ActivityTrackerService';
+import * as k8s from '@kubernetes/client-node';
+import * as net from 'net';
 
 let logger: Logger;
 let oldConfig: vscode.WorkspaceConfiguration;
@@ -67,7 +72,7 @@ export async function activate(
   // --- Detect if we're in a remote session ---
   const effectiveRemote = vscode.env.remoteName ?? '';
   if (effectiveRemote.startsWith(DEVSPACES_AUTHORITY)) {
-    setupRemoteSession(context, effectiveRemote);
+    await setupRemoteSession(context, effectiveRemote);
     return;
   }
 
@@ -75,6 +80,56 @@ export async function activate(
   await setupLocalSession(context);
 
   logger.info('Dev Spaces Connector activated');
+}
+
+async function track(events: vscode.Event<any>[], logger: Logger, context: vscode.ExtensionContext, authProvider: OpenShiftAuthProvider) {
+  const activeConn: ActiveConnectionInfo | undefined = context.globalState.get<ActiveConnectionInfo>(STATE_ACTIVE_CONNECTION);
+  if (!activeConn) {
+    return;
+  }
+
+  const clusterDiscovery: ClusterDiscovery = new ClusterDiscovery();
+  const endpoints: ClusterEndpoints = await clusterDiscovery.discover(activeConn.clusterUrl);
+  if (!endpoints) {
+    return;
+  }
+
+  const kubeClientFactory = new KubeClientFactory();
+  const kubeConfig: k8s.KubeConfig = kubeClientFactory.createConfig(endpoints.apiUrl, await authProvider.getAccessToken());
+  const coreApi = kubeConfig.makeApiClient(k8s.CoreV1Api);
+  const podList = await coreApi.listNamespacedPod({
+    namespace: activeConn.namespace,
+    labelSelector: `${LABEL_DEVWORKSPACE_ID}=${activeConn.devworkspaceId}`,
+  });
+  if (podList.items.length === 0) {
+    return;
+  }
+
+  const pod = podList.items[0];
+  const podName = pod.metadata?.name;
+  if (!podName) {
+    return;
+  }
+
+  const forward = new k8s.PortForward(kubeConfig);
+  const server = net.createServer((socket) => {
+    void forward.portForward(activeConn.namespace, podName, [MACHINE_EXEC_PORT], socket, null, socket);
+  });
+
+  const localPort = await new Promise<number>((resolve, reject) => {
+    server.on('error', reject);
+    server.listen(0, '127.0.0.1', () => resolve((server.address() as net.AddressInfo).port));
+  });
+
+  const activityTracker = new ActivityTrackerService(logger, localPort);
+
+  events.forEach((e: vscode.Event<any>) => {
+    context.subscriptions.push(
+      e(async () => {
+        await activityTracker.resetTimeout();
+      })
+    );
+  });
 }
 
 export async function deactivate(): Promise<void> {
@@ -146,7 +201,7 @@ function registerResolver(context: vscode.ExtensionContext): void {
 // Remote Session Setup
 // =========================================================================
 
-function setupRemoteSession(context: vscode.ExtensionContext, effectiveRemote: string): void {
+async function setupRemoteSession(context: vscode.ExtensionContext, effectiveRemote: string): Promise<void> {
   logger.info(`Running in remote session: ${effectiveRemote}`);
   vscode.commands.executeCommand('setContext', CTX_CONNECTED, true);
   vscode.commands.executeCommand('setContext', 'devspaces.isRemoteSession', true);
@@ -183,6 +238,18 @@ function setupRemoteSession(context: vscode.ExtensionContext, effectiveRemote: s
   } else {
     logger.warn('Remote session: no active connection info found — remote commands unavailable');
   }
+
+  // --- Idling Support ---
+  const eventsToTrack = [
+    vscode.workspace.onDidChangeTextDocument,
+    vscode.window.onDidChangeActiveTextEditor,
+    vscode.window.onDidChangeTextEditorSelection,
+    vscode.window.onDidChangeTextEditorViewColumn,
+    vscode.window.onDidChangeWindowState,
+    vscode.window.onDidChangeTerminalState,
+    vscode.window.onDidChangeActiveTerminal,
+  ];
+  await track(eventsToTrack, logger, context, authProvider);
 }
 
 // =========================================================================
@@ -304,7 +371,7 @@ async function setupLocalSession(context: vscode.ExtensionContext): Promise<void
     const newConfig = vscode.workspace.getConfiguration('devspaces');
 
     if (hasConfigKeyChanged('certificateValidation.enabled', oldConfig, newConfig)) {
-       process.env.NODE_TLS_REJECT_UNAUTHORIZED = newConfig.get('certificateValidation.enabled', true) ? '1' : '0';
+      process.env.NODE_TLS_REJECT_UNAUTHORIZED = newConfig.get('certificateValidation.enabled', true) ? '1' : '0';
     }
 
     oldConfig = newConfig;
