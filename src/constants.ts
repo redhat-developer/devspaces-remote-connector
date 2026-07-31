@@ -51,3 +51,9 @@ export const TOKEN_REFRESH_BUFFER = 300_000; // Refresh 5 minutes before expiry
 
 /** Projects root inside workspace pods */
 export const PROJECTS_ROOT = '/projects';
+
+/** Remote workspace port on which machine-exec listens
+ *  https://github.com/che-incubator/che-code/blob/7.121.0/build/scripts/entrypoint-volume.sh#L126
+ *  https://github.com/che-incubator/jetbrains-ide-dev-server/blob/7.121.0/build/scripts/entrypoint-volume.sh#L165
+*/
+export const MACHINE_EXEC_PORT = 3333;

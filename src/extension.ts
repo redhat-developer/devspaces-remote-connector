@@ -16,7 +16,7 @@ import { ClusterManager } from './cluster/ClusterManager';
 import { ClusterSessionManager } from './cluster/ClusterSessionManager';
 import { DevSpacesResolver } from './remote/DevSpacesResolver';
 import { createGetKubeConfig, createFindPodAndContainer, createCheckAndStartWorkspace } from './remote/resolverCallbacks';
-import { registerRemoteCommands, ActiveConnectionInfo } from './commands/remoteCommands';
+import { registerRemoteCommands, ActiveConnectionInfo, track } from './commands/remoteCommands';
 import { registerWorkspaceCommands } from './commands/workspaceCommands';
 import { registerAuthCommands } from './commands/authCommands';
 import { registerClusterCommands } from './commands/clusterCommands';
@@ -67,7 +67,7 @@ export async function activate(
   // --- Detect if we're in a remote session ---
   const effectiveRemote = vscode.env.remoteName ?? '';
   if (effectiveRemote.startsWith(DEVSPACES_AUTHORITY)) {
-    setupRemoteSession(context, effectiveRemote);
+    await setupRemoteSession(context, effectiveRemote);
     return;
   }
 
@@ -146,7 +146,7 @@ function registerResolver(context: vscode.ExtensionContext): void {
 // Remote Session Setup
 // =========================================================================
 
-function setupRemoteSession(context: vscode.ExtensionContext, effectiveRemote: string): void {
+async function setupRemoteSession(context: vscode.ExtensionContext, effectiveRemote: string): Promise<void> {
   logger.info(`Running in remote session: ${effectiveRemote}`);
   vscode.commands.executeCommand('setContext', CTX_CONNECTED, true);
   vscode.commands.executeCommand('setContext', 'devspaces.isRemoteSession', true);
@@ -183,6 +183,18 @@ function setupRemoteSession(context: vscode.ExtensionContext, effectiveRemote: s
   } else {
     logger.warn('Remote session: no active connection info found — remote commands unavailable');
   }
+
+  // --- Idling Support ---
+  const eventsToTrack = [
+    vscode.workspace.onDidChangeTextDocument,
+    vscode.window.onDidChangeActiveTextEditor,
+    vscode.window.onDidChangeTextEditorSelection,
+    vscode.window.onDidChangeTextEditorViewColumn,
+    vscode.window.onDidChangeWindowState,
+    vscode.window.onDidChangeTerminalState,
+    vscode.window.onDidChangeActiveTerminal,
+  ];
+  await track(eventsToTrack, logger, context, authProvider);
 }
 
 // =========================================================================
@@ -304,7 +316,7 @@ async function setupLocalSession(context: vscode.ExtensionContext): Promise<void
     const newConfig = vscode.workspace.getConfiguration('devspaces');
 
     if (hasConfigKeyChanged('certificateValidation.enabled', oldConfig, newConfig)) {
-       process.env.NODE_TLS_REJECT_UNAUTHORIZED = newConfig.get('certificateValidation.enabled', true) ? '1' : '0';
+      process.env.NODE_TLS_REJECT_UNAUTHORIZED = newConfig.get('certificateValidation.enabled', true) ? '1' : '0';
     }
 
     oldConfig = newConfig;

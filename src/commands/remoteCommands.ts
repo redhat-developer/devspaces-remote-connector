@@ -1,14 +1,17 @@
 import * as vscode from 'vscode';
 import * as k8s from '@kubernetes/client-node';
+import * as net from 'net';
 import * as jsYaml from 'js-yaml';
 import { Logger } from '../util/Logger';
 import { TokenManager } from '../auth/TokenManager';
-import { ClusterDiscovery } from '../auth/ClusterDiscovery';
+import { ClusterDiscovery, ClusterEndpoints } from '../auth/ClusterDiscovery';
 import { KubeClientFactory } from '../kubernetes/KubeClientFactory';
 import { KubeAuthHelper, findWorkspacePodAndContainer, getDevWorkspacePhase } from '../kubernetes/KubeAuthHelper';
 import { DevWorkspaceResource } from '../kubernetes/DevWorkspaceTypes';
 import { execOnPod } from '../kubernetes/execHelper';
-import { SIDECAR_PREFIXES, DW_API_GROUP, DW_API_VERSION, DW_PLURAL } from '../constants';
+import { SIDECAR_PREFIXES, DW_API_GROUP, DW_API_VERSION, DW_PLURAL, STATE_ACTIVE_CONNECTION, LABEL_DEVWORKSPACE_ID, MACHINE_EXEC_PORT } from '../constants';
+import { OpenShiftAuthProvider } from '../auth/OpenShiftAuthProvider';
+import { ActivityTrackerService } from '../remote/ActivityTrackerService';
 
 export interface ActiveConnectionInfo {
   workspaceName: string;
@@ -226,4 +229,57 @@ export function registerRemoteCommands(
   );
 
   logger.info('Remote commands registered');
+}
+
+export async function track(events: vscode.Event<any>[], logger: Logger, context: vscode.ExtensionContext, authProvider: OpenShiftAuthProvider) {
+  const activeConn: ActiveConnectionInfo | undefined = context.globalState.get<ActiveConnectionInfo>(STATE_ACTIVE_CONNECTION);
+  if (!activeConn) {
+    logger.info(`Unable to retrieve active connection info.`);
+    return;
+  }
+
+  const clusterDiscovery: ClusterDiscovery = new ClusterDiscovery();
+  const endpoints: ClusterEndpoints = await clusterDiscovery.discover(activeConn.clusterUrl);
+  if (!endpoints) {
+    logger.info(`Unable to retrieve cluster URL for active connection.`);
+    return;
+  }
+
+  const kubeClientFactory = new KubeClientFactory();
+  const kubeConfig: k8s.KubeConfig = kubeClientFactory.createConfig(endpoints.apiUrl, await authProvider.getAccessToken());
+  const coreApi = kubeConfig.makeApiClient(k8s.CoreV1Api);
+  const podList = await coreApi.listNamespacedPod({
+    namespace: activeConn.namespace,
+    labelSelector: `${LABEL_DEVWORKSPACE_ID}=${activeConn.devworkspaceId}`,
+  });
+  if (podList.items.length === 0) {
+    logger.info(`Unable to retrieve pod in namespace: ${activeConn.namespace} with devworkspaceId: ${activeConn.devworkspaceId}.`);
+    return;
+  }
+
+  const pod = podList.items[0];
+  const podName = pod.metadata?.name;
+  if (!podName) {
+    return;
+  }
+
+  const forward = new k8s.PortForward(kubeConfig);
+  const server = net.createServer((socket) => {
+    void forward.portForward(activeConn.namespace, podName, [MACHINE_EXEC_PORT], socket, null, socket);
+  });
+
+  const localPort = await new Promise<number>((resolve, reject) => {
+    server.on('error', reject);
+    server.listen(0, '127.0.0.1', () => resolve((server.address() as net.AddressInfo).port));
+  });
+
+  const activityTracker = new ActivityTrackerService(logger, localPort);
+
+  events.forEach((e: vscode.Event<any>) => {
+    context.subscriptions.push(
+      e(async () => {
+        await activityTracker.resetTimeout();
+      })
+    );
+  });
 }
