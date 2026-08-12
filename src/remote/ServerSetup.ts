@@ -448,8 +448,9 @@ function generateInstallScript(opts: ScriptOptions): string {
       'No REH server download URL configured. Set "devspaces.rehDownloadUrl" in settings or ensure your IDE\'s product.json contains "serverDownloadUrlTemplate".'
     );
   }
-  const urlSafePattern = /^https?:\/\/[a-zA-Z0-9._\-\/:${}]+$/;
-  if (!urlSafePattern.test(opts.downloadUrlTemplate)) {
+
+  const sanitizedUrl = opts.downloadUrlTemplate.replace(/\$\{[^}]+\}/g, 'dummy');
+  if (!URL.canParse(sanitizedUrl)) {
     throw new ServerInstallError('Unsafe download URL template');
   }
 
