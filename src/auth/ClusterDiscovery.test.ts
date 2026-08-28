@@ -78,7 +78,7 @@ describe('ClusterDiscovery', () => {
 
   describe('buildDevSpacesUrl', () => {
     it('builds devspaces URL from apps domain', () => {
-      expect(discovery.buildDevSpacesUrl('apps.mycluster-01.abc1.p1.openshiftapps.com'))
+      expect(discovery.buildDevSpacesUrl('https://devspaces.apps.mycluster-01.abc1.p1.openshiftapps.com'))
         .toBe('https://devspaces.apps.mycluster-01.abc1.p1.openshiftapps.com');
     });
   });

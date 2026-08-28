@@ -90,8 +90,10 @@ export class ClusterDiscovery {
   /**
    * Build the DevSpaces dashboard URL from the apps domain.
    */
-  buildDevSpacesUrl(appsDomain: string): string {
-    return `https://devspaces.${appsDomain}`;
+  buildDevSpacesUrl(baseUrl: string): string {
+    // This used to be `https://devspaces.${appsDomain}`
+    // But this is incorrect, so just reuse cluster URL
+    return baseUrl;
   }
 
   /**
@@ -103,22 +105,21 @@ export class ClusterDiscovery {
     let appsDomain = this.extractAppsDomain(inputUrl);
 
     // If we couldn't extract from the hostname, try following /oauth/start
+    const baseUrl = this.normalizeInputUrl(inputUrl);
     if (!appsDomain) {
-      const baseUrl = this.normalizeInputUrl(inputUrl);
       this.logger.debug(`Could not extract apps domain from hostname, trying /oauth/start redirect from ${baseUrl}`);
       appsDomain = await this.discoverAppsDomainViaRedirect(baseUrl);
     }
 
-    const clusterBase = appsDomain.replace(/^apps\./, '');
-    const apiUrl = `https://api.${clusterBase}:6443`;
-    const devSpacesUrl = this.buildDevSpacesUrl(appsDomain);
+    const apiUrl = await this.buildKubeAPIServerURL(appsDomain);
+    const devSpacesUrl = this.buildDevSpacesUrl(baseUrl);
 
     this.logger.debug(`Apps domain: ${appsDomain}`);
     this.logger.debug(`API URL: ${apiUrl}`);
     this.logger.debug(`DevSpaces URL: ${devSpacesUrl}`);
 
     // Fetch OAuth metadata from the API server
-    const oauthMeta = await this.fetchOAuthMetadata(apiUrl);
+    const oauthMeta = await this.fetchOAuthMetadata(baseUrl, apiUrl);
 
     const endpoints: ClusterEndpoints = {
       devSpacesUrl,
@@ -130,6 +131,29 @@ export class ClusterDiscovery {
 
     this.logger.info(`Cluster discovery complete: API=${apiUrl}, DevSpaces=${devSpacesUrl}`);
     return endpoints;
+  }
+
+  async buildKubeAPIServerURL(appsDomain: string): Promise<string> {
+    const consoleURL = `https://console-openshift-console.${appsDomain}`;
+    const response = await request({ url: consoleURL, method: 'GET' });
+    const html = response.data;
+
+    // Find the line with window.SERVER_FLAGS = {...};
+    // https://github.com/openshift/console/blob/release-4.21/frontend/public/index.html#L62
+    // https://github.com/openshift/console/blob/release-4.21/pkg/server/server.go#L805-L811
+    // https://github.com/openshift/console/blob/release-4.21/pkg/server/server.go#L124
+    const match = html.match(/window\.SERVER_FLAGS\s*=\s*({.*?});/s);
+
+    if (!match) {
+      const clusterBase = appsDomain.replace(/^apps\./, '');
+      const defaultApiUrl = `https://api.${clusterBase}:6443`;
+      this.logger.debug(`Could not find SERVER_FLAGS in ${consoleURL} HTML response`);
+      this.logger.debug(`Falling back to ${defaultApiUrl}`);
+      return defaultApiUrl;
+    }
+
+    const serverFlags = JSON.parse(match[1]);
+    return serverFlags.kubeAPIServerURL;
   }
 
   /**
@@ -176,25 +200,47 @@ export class ClusterDiscovery {
    * Fetch the OAuth metadata from the OpenShift API server.
    */
   private async fetchOAuthMetadata(
+    baseUrl: string,
     apiUrl: string
   ): Promise<{ authorization_endpoint: string; token_endpoint: string }> {
-    const url = `${apiUrl}/.well-known/oauth-authorization-server`;
-    this.logger.debug(`Fetching OAuth metadata from ${url}`);
-
+    // Try API server first
     try {
+      const url = `${apiUrl}/.well-known/oauth-authorization-server`;
+      this.logger.debug(`Fetching OAuth metadata from ${url}`);
       const res = await request({ url, method: 'GET' });
       const meta = JSON.parse(res.data);
-      if (!meta.authorization_endpoint || !meta.token_endpoint) {
-        throw new Error('OAuth metadata missing authorization_endpoint or token_endpoint');
+      if (meta.authorization_endpoint && meta.token_endpoint) {
+        return meta;
       }
-      return meta;
+    } catch (apiErr) {
+      this.logger.debug(`Failed to fetch OAuth metadata from ${apiUrl}: ${apiErr}`);
+    }
+
+    // Fallback: follow /oauth/start redirect to find OAuth server
+    try {
+      const url = `${baseUrl}/oauth/start`;
+      this.logger.debug(`Following redirect from ${url} to discover OAuth endpoints`);
+      await request({ url, method: 'GET', headers: { Accept: 'text/html' } });
+      // If we got a 2xx, there's no redirect
+      throw new Error(`Could not discover OAuth endpoints from ${baseUrl}: no redirect from /oauth/start`);
     } catch (err) {
-      if (err instanceof HttpError) {
-        throw new Error(`Failed to fetch OAuth metadata from ${apiUrl}: HTTP ${err.statusCode}`);
+      if (err instanceof HttpError && err.statusCode >= 300 && err.statusCode < 400) {
+        const location = err.responseHeaders.location;
+        if (location) {
+          const locationStr = Array.isArray(location) ? location[0] : location;
+          try {
+            const oauthServerUrl = new URL(locationStr).origin;
+            this.logger.debug(`Discovered OAuth server from redirect: ${oauthServerUrl}`);
+            return {
+              authorization_endpoint: `${oauthServerUrl}/oauth/authorize`,
+              token_endpoint: `${oauthServerUrl}/oauth/token`
+            };
+          } catch { /* fall through */ }
+        }
       }
       throw err instanceof Error
-        ? new Error(`Failed to fetch OAuth metadata from ${apiUrl}: ${err.message}`)
-        : new Error(`Failed to fetch OAuth metadata from ${apiUrl}: ${err}`);
+        ? new Error(`Failed to discover OAuth endpoints: ${err.message}`)
+        : new Error(`Failed to discover OAuth endpoints`);
     }
   }
 }

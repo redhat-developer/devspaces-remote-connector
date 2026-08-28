@@ -104,7 +104,7 @@ export class ClusterManager {
       const extracted = discovery.extractAppsDomain(normalizedUrl);
       if (extracted) {
         appsDomain = extracted;
-        devSpacesUrl = discovery.buildDevSpacesUrl(extracted);
+        devSpacesUrl = discovery.buildDevSpacesUrl(normalizedUrl);
       }
     }
 
