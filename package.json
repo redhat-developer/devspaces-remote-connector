@@ -88,7 +88,7 @@
         "command": "devspaces.addCluster",
         "title": "Add Cluster",
         "category": "Dev Spaces",
-        "icon": "$(add)"
+        "icon": "$(server)"
       },
       {
         "command": "devspaces.refreshWorkspaces",
@@ -269,14 +269,19 @@
       ],
       "view/title": [
         {
+          "command": "devspaces.addCluster",
+          "when": "view == devspacesWorkspaces",
+          "group": "navigation@1"
+        },
+        {
           "command": "devspaces.newWorkspace",
           "when": "view == devspacesWorkspaces && !devspaces.initializing",
-          "group": "navigation@1"
+          "group": "navigation@2"
         },
         {
           "command": "devspaces.refreshWorkspaces",
           "when": "view == devspacesWorkspaces",
-          "group": "navigation@2"
+          "group": "navigation@3"
         },
         {
           "command": "devspaces.createWorkspace",
