@@ -471,8 +471,14 @@ function generateInstallScript(opts: ScriptOptions): string {
 
 TMP_DIR="\${XDG_RUNTIME_DIR:-"/tmp"}"
 
+SERVER_USE_PRE_INSTALLED=${opts.usePreinstalledServer}
+SERVER_PRE_INSTALL_PATH=${opts.serverPreInstallPath}
+
 # Determine writable data directory (try $HOME first, fallback to /var/tmp/user/)
-if [ -w "$HOME" ]; then
+if [ "$SERVER_USE_PRE_INSTALLED" == 'true' ]; then
+    SERVER_DATA_DIR="$SERVER_PRE_INSTALL_PATH"
+    echo "Detected configured pre-installed server path of $SERVER_PRE_INSTALL_PATH"
+elif [ -w "$HOME" ]; then
     SERVER_DATA_DIR="$HOME/${opts.serverDataFolderName}"
 else
     echo "Warning: $HOME is not writable, using /var/tmp/user/ instead"
@@ -536,14 +542,14 @@ if [ -z "$OS_RELEASE_ID" ]; then
 fi
 
 mkdir -p "$SERVER_DIR" 2>/dev/null
-if [ $? -ne 0 ]; then
+if [ $? -ne 0 ] && [ "$SERVER_USE_PRE_INSTALLED" != 'true' ]; then
     echo "Error creating server install directory"
     print_install_results_and_exit 1
 fi
 
 SERVER_DOWNLOAD_URL="${urlTemplate}"
 
-if [ ! -f "$SERVER_SCRIPT" ]; then
+if [ ! -f "$SERVER_SCRIPT" ] && [ "$SERVER_USE_PRE_INSTALLED" != 'true' ]; then
     echo "Downloading server from $SERVER_DOWNLOAD_URL"
     cd "$SERVER_DIR" || exit 1
 
@@ -591,14 +597,29 @@ if [ ! -f "$SERVER_SCRIPT" ]; then
 
     rm -f vscode-server.tar.gz
 
-    if [ ! -f "$SERVER_SCRIPT" ]; then
-        echo "Error: server binary not found after extraction"
-        print_install_results_and_exit 1
-    fi
-
     echo "Server installed to $SERVER_DIR"
 else
-    echo "Server already installed at $SERVER_SCRIPT"
+    if [ "$SERVER_USE_PRE_INSTALLED" == 'true' ]; then
+      if [ ! -e "$SERVER_PRE_INSTALL_PATH" ]; then
+        echo "Error: The pre-installed server path does not exist."
+        print_install_results_and_exit 1
+      elif [ ! -e "$SERVER_DIR" ]; then
+        echo "Error: Expected $DISTRO_COMMIT folder on pre-installed $SERVER_DIR path, but not found."
+        print_install_results_and_exit 1
+      elif [ ! -e $SERVER_SCRIPT ]; then
+        echo "Error: Expected pre-installed $SERVER_SCRIPT binary, but not found."
+        print_install_results_and_exit 1
+      else
+        echo "Using pre-installed server configured at $SERVER_PRE_INSTALL_PATH"
+      fi
+    else
+      echo "Server already installed at $SERVER_SCRIPT"
+    fi
+fi
+
+if [ ! -f "$SERVER_SCRIPT" ]; then
+    echo "Error: server binary not found at $SERVER_SCRIPT"
+    print_install_results_and_exit 1
 fi
 
 # Always kill existing server and start fresh — reconnection requires

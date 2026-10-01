@@ -9,6 +9,8 @@ export interface ServerConfig {
   quality: string;
   serverApplicationName: string;
   serverDataFolderName: string;
+  usePreinstalledServer: boolean;
+  serverPreInstallPath: string;
   downloadUrlTemplate: string;
 }
 
@@ -23,6 +25,8 @@ export async function getServerConfig(): Promise<ServerConfig> {
 
   const logger = Logger.getInstance();
   const isKiro = vscode.env.appName?.toLowerCase().includes('kiro');
+  const usePreinstalledServer = vscode.workspace.getConfiguration('devspaces').get<boolean>('usePreinstalledServer') ?? false;
+  const serverPreInstallPath = vscode.workspace.getConfiguration('devspaces').get<string>('serverInstallPath') ?? '';
 
   try {
     const productJsonPath = path.join(vscode.env.appRoot, 'product.json');
@@ -41,6 +45,8 @@ export async function getServerConfig(): Promise<ServerConfig> {
       quality: product.quality ?? 'stable',
       serverApplicationName: product.serverApplicationName ?? defaultAppName,
       serverDataFolderName: product.serverDataFolderName ?? defaultDataFolder,
+      usePreinstalledServer: usePreinstalledServer,
+      serverPreInstallPath: serverPreInstallPath,
       downloadUrlTemplate: rehUrl || product.serverDownloadUrlTemplate || constructFallbackUrl(product) || '',
     };
 
@@ -55,6 +61,8 @@ export async function getServerConfig(): Promise<ServerConfig> {
       quality: 'stable',
       serverApplicationName: defaultAppName,
       serverDataFolderName: defaultDataFolder,
+      usePreinstalledServer: usePreinstalledServer,
+      serverPreInstallPath: serverPreInstallPath,
       downloadUrlTemplate: '',
     };
   }

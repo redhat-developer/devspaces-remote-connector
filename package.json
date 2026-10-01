@@ -396,6 +396,16 @@
           "default": "",
           "description": "Custom URL template for downloading the Remote Extension Host (REH) server binary. Format: `https://your-host/path/${commit}/kiro-reh-${os}-${arch}.tar.gz`. If empty, uses the `serverDownloadUrlTemplate` from the IDE's built-in product.json."
         },
+        "devspaces.usePreinstalledServer": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Whether to use a pre-installed Remote Extension Host (REH) server, as defined by `#devspaces.serverInstallPath#`."
+        },
+        "devspaces.serverInstallPath": {
+          "type": "string",
+          "default": "/opt/vscode-server",
+          "markdownDescription": "The pre-installed Remote Extension Host (REH) server path to use when `#devspaces.usePreinstalledServer#` is enabled."
+        },
         "devspaces.connectionTimeout": {
           "type": "number",
           "default": 300,

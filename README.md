@@ -72,6 +72,8 @@ Add the extension ID to the `enable-proposed-api` array in your IDE's extension 
 | `devspaces.initialization.pollInterval` | `2` | Poll interval (seconds) for readiness check. |
 | `devspaces.initialization.namespaceAgeThreshold` | `300` | Namespace age threshold (seconds). Set to 0 to always check. |
 | `devspaces.certificateValidation.enabled` | `true` | Whether to reject cluster SSL/TLS certificates that are invalid, expired or self-signed. |
+| `devspaces.usePreinstalledServer` | `false` | Whether to use a pre-installed Remote Extension Host (REH) server, as defined by `devspaces.serverInstallPath`. |
+| `devspaces.serverInstalledPath` | `/opt/vscode-server` | The pre-installed Remote Extension Host (REH) server path to use when `devspaces.usePreinstalledServer` is enabled. |
 
 ## Commands
 
