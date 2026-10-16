@@ -324,7 +324,9 @@ async function uploadViaStreaming(
       namespace,
       podName,
       containerName,
-      ['sh', '-c', `cat > ${destFile}`],
+      // Stream to a temp file, then atomically rename into place so the
+      // remote poll loop only sees the final path once the upload is complete.
+      ['sh', '-c', `cat > ${destFile}.part && mv ${destFile}.part ${destFile}`],
       null,  // stdout - not needed
       stderrStream,
       readStream,  // stdin - stream the file
@@ -565,8 +567,9 @@ if [ ! -f "$SERVER_SCRIPT" ]; then
         echo "__DEVSPACES_TRANSFER_END__"
         echo "Waiting for client to upload tarball..."
 
-        # Poll for transferred file (up to 2 minutes)
-        for i in \$(seq 1 60); do
+        # Poll for transferred file (up to 5 minutes)
+        # Large downloads (200+ MB) over restricted networks can take time
+        for i in \$(seq 1 300); do
             if [ -f "$SERVER_DIR/vscode-server.tar.gz" ]; then
                 echo "Client transfer complete"
                 break
