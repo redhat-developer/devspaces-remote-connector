@@ -6,6 +6,7 @@
 - Keep the API server from sign-in when reconnecting through a shared ingress.
 - Update the active cluster URL only for the cluster that owns it.
 - Give each ROSA and shared-ingress host its own cluster id so primary and DR do not collapse into one entry.
+- Keep the OpenShift token when Connect uses that CheCluster host, so a dashboard on a different domain than the API server still finds the stored session.
 
 ## 0.7.0
 
