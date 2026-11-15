@@ -10,7 +10,7 @@
 import { execFileSync } from 'child_process';
 import { lookup } from 'dns/promises';
 import { ClusterDiscovery } from './ClusterDiscovery';
-import { chooseDevSpacesUrl, readDevSpacesUrlSources, CustomObjectReader } from './devSpacesUrl';
+import { resolveDevSpacesUrl, CustomObjectReader } from './devSpacesUrl';
 import { lookupKnownApiUrl } from '../kubernetes/knownApiUrl';
 
 const live = process.env.DEVSPACES_LIVE === '1';
@@ -31,8 +31,7 @@ describeLive('live Dev Spaces URL', () => {
     const dashboard = `https://${routeHost}`;
     const guessedFromApi = new ClusterDiscovery().buildDevSpacesUrl(apiServer);
 
-    const sources = await readDevSpacesUrlSources(ocReader());
-    const chosen = chooseDevSpacesUrl(sources, guessedFromApi);
+    const chosen = await resolveDevSpacesUrl(ocReader(), guessedFromApi);
 
     expect(chosen).toEqual({ url: dashboard, source: 'che-cluster' });
     expect(chosen.url).not.toBe(guessedFromApi);
@@ -73,7 +72,7 @@ function ocReader(): CustomObjectReader {
   };
 }
 
-function ocRaw(path: string): Promise<unknown> {
+function ocRaw(path: string): Promise<any> {
   const body = execFileSync('oc', ['get', '--raw', path], { encoding: 'utf8' });
-  return Promise.resolve(JSON.parse(body) as unknown);
+  return Promise.resolve(JSON.parse(body));
 }

@@ -127,9 +127,9 @@ function registerResolver(context: vscode.ExtensionContext): void {
         }
         return undefined;
       },
-      createGetKubeConfig(context.globalState, resolverTokenManager, resolverKubeFactory, resolverClusterDiscovery),
+      createGetKubeConfig(resolverClusterManager, resolverTokenManager, resolverKubeFactory, resolverClusterDiscovery),
       createFindPodAndContainer(),
-      createCheckAndStartWorkspace(context.globalState, resolverTokenManager, resolverKubeFactory, resolverClusterDiscovery)
+      createCheckAndStartWorkspace(resolverClusterManager, resolverTokenManager, resolverKubeFactory, resolverClusterDiscovery)
     );
 
     context.subscriptions.push(

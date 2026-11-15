@@ -6,7 +6,6 @@ import { ClusterManager } from '../cluster/ClusterManager';
 import { WorkspaceManager } from '../workspace/WorkspaceManager';
 import { WorkspaceTreeProvider } from '../ui/WorkspaceTreeProvider';
 import { StatusBarManager } from '../ui/StatusBarManager';
-import { tokenStorageKeys } from '../kubernetes/knownApiUrl';
 import {
   CTX_AUTHENTICATED,
   CTX_CONNECTED,
@@ -95,12 +94,10 @@ export function registerAuthCommands(deps: AuthCommandsDeps): void {
       }
 
       try {
-        // Remove tokens (stored under multiple keys)
+        // Remove tokens (resolves all stored aliases via cluster mappings)
         const clusters = clusterManager.getClusters();
         for (const cluster of clusters) {
-          for (const key of tokenStorageKeys(cluster.devSpacesUrl, [cluster])) {
-            await tokenManager.deleteToken(key);
-          }
+          await tokenManager.deleteToken(cluster.devSpacesUrl);
         }
         const legacyUrl = context.globalState.get<string>(STATE_CLUSTER_URL);
         if (legacyUrl) {

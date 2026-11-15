@@ -47,9 +47,16 @@ export class KubeAuthHelper {
     }
     keysToTry.push(clusterIdFromUrl(clusterUrl));
 
+    const seen = new Set<string>();
     for (const key of keysToTry) {
-      const storedToken = await this.tokenManager.getToken(key);
-      if (storedToken && this.tokenManager.isTokenValid(storedToken)) {
+      if (!key || seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      const storedToken = typeof this.tokenManager.getValidToken === 'function'
+        ? await this.tokenManager.getValidToken(key)
+        : await this.getLegacyValidToken(key);
+      if (storedToken) {
         this.logger.debug(`Token resolved (key=${key})`);
         return storedToken.accessToken;
       }
@@ -57,6 +64,11 @@ export class KubeAuthHelper {
 
     this.logger.debug(`No valid token found for ${clusterUrl}`);
     return undefined;
+  }
+
+  private async getLegacyValidToken(key: string) {
+    const storedToken = await this.tokenManager.getToken(key);
+    return storedToken && this.tokenManager.isTokenValid(storedToken) ? storedToken : undefined;
   }
 
   /**

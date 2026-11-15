@@ -28,6 +28,14 @@ export interface ClusterEntry {
 const STORAGE_KEY = CLUSTERS_STATE_KEY;
 
 /**
+ * Read registered clusters from globalState without instantiating ClusterManager.
+ */
+export function getClusters(globalState: { get<T>(key: string): T | undefined }): ClusterEntry[] {
+  const stored = globalState.get<ClusterEntry[]>(STORAGE_KEY);
+  return Array.isArray(stored) ? stored : [];
+}
+
+/**
  * Manages the list of registered DevSpaces clusters.
  *
  * Clusters are stored in globalState. On first launch, clusters from
@@ -92,7 +100,7 @@ export class ClusterManager {
    * Get all registered clusters.
    */
   getClusters(): ClusterEntry[] {
-    return this.globalState.get<ClusterEntry[]>(STORAGE_KEY, []);
+    return getClusters(this.globalState);
   }
 
   async addCluster(url: string, endpoints?: { apiUrl: string; devSpacesUrl: string; appsDomain: string }): Promise<ClusterEntry> {
@@ -110,8 +118,8 @@ export class ClusterManager {
       const extracted = discovery.extractAppsDomain(normalizedUrl);
       if (extracted) {
         appsDomain = extracted;
-        devSpacesUrl = discovery.buildDevSpacesUrl(normalizedUrl);
       }
+      devSpacesUrl = discovery.buildDevSpacesUrl(normalizedUrl);
     }
 
     const id = this.urlToId(devSpacesUrl);

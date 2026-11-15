@@ -16,14 +16,8 @@ export interface CustomObjectListRequest {
 }
 
 export interface CustomObjectReader {
-  listClusterCustomObject(request: CustomObjectListRequest): Promise<unknown>;
-  listNamespacedCustomObject(request: CustomObjectListRequest & { namespace: string }): Promise<unknown>;
-}
-
-export interface DevSpacesUrlSources {
-  cheUrls: string[];
-  routeHosts: string[];
-  consoleLinkHrefs: string[];
+  listClusterCustomObject(request: CustomObjectListRequest): Promise<any>;
+  listNamespacedCustomObject(request: CustomObjectListRequest & { namespace: string }): Promise<any>;
 }
 
 export type DevSpacesUrlSource = 'che-cluster' | 'route' | 'console-link' | 'fallback';
@@ -33,10 +27,20 @@ export interface ChosenDevSpacesUrl {
   source: DevSpacesUrlSource;
 }
 
-export async function readDevSpacesUrlSources(
+/**
+ * Resolve the public Dev Spaces dashboard origin from cluster resources,
+ * returning as soon as the highest-priority source yields a valid HTTPS URL:
+ *
+ * 1. `CheCluster` (`status.cheURL`, then `spec.networking.hostname`)
+ * 2. OpenShift `Route` in the Dev Spaces namespace
+ * 3. OpenShift `ConsoleLink`
+ * 4. `fallbackUrl` derived from user input
+ */
+export async function resolveDevSpacesUrl(
   reader: CustomObjectReader,
+  fallbackUrl: string,
   onDebug: (message: string) => void = () => undefined,
-): Promise<DevSpacesUrlSources> {
+): Promise<ChosenDevSpacesUrl> {
   const cheItems = await tryList(
     () => reader.listClusterCustomObject({
       group: 'org.eclipse.che',
@@ -46,9 +50,14 @@ export async function readDevSpacesUrlSources(
     (err) => onDebug(`CheCluster lookup failed: ${errorText(err)}`),
   );
 
+  const che = firstPublicOrigin(cheCandidates(cheItems));
+  if (che) {
+    return { url: che, source: 'che-cluster' };
+  }
+
   const namespaces = new Set<string>();
   for (const item of cheItems) {
-    const namespace = asRecord(asRecord(item).metadata).namespace;
+    const namespace = item?.metadata?.namespace;
     if (typeof namespace === 'string' && namespace) {
       namespaces.add(namespace);
     }
@@ -57,7 +66,6 @@ export async function readDevSpacesUrlSources(
     namespaces.add('openshift-devspaces');
   }
 
-  const routeHosts: string[] = [];
   for (const namespace of namespaces) {
     const routes = await tryList(
       () => reader.listNamespacedCustomObject({
@@ -68,7 +76,10 @@ export async function readDevSpacesUrlSources(
       }),
       (err) => onDebug(`Route lookup in ${namespace} failed: ${errorText(err)}`),
     );
-    routeHosts.push(...routeCandidates(routes));
+    const route = firstPublicOrigin(routeCandidates(routes));
+    if (route) {
+      return { url: route, source: 'route' };
+    }
   }
 
   const links = await tryList(
@@ -79,41 +90,18 @@ export async function readDevSpacesUrlSources(
     }),
     (err) => onDebug(`ConsoleLink lookup failed: ${errorText(err)}`),
   );
-
-  return {
-    cheUrls: cheCandidates(cheItems),
-    routeHosts,
-    consoleLinkHrefs: consoleLinkCandidates(links),
-  };
-}
-
-/**
- * Pick the dashboard origin to call.
- *
- * CheCluster `status.cheURL` wins, then the Dev Spaces route host, then the
- * OpenShift console link. The fallback is the URL already derived from what
- * the user typed.
- */
-export function chooseDevSpacesUrl(sources: DevSpacesUrlSources, fallbackUrl: string): ChosenDevSpacesUrl {
-  const che = firstPublicOrigin(sources.cheUrls);
-  if (che) {
-    return { url: che, source: 'che-cluster' };
-  }
-  const route = firstPublicOrigin(sources.routeHosts);
-  if (route) {
-    return { url: route, source: 'route' };
-  }
-  const link = firstPublicOrigin(sources.consoleLinkHrefs);
+  const link = firstPublicOrigin(consoleLinkCandidates(links));
   if (link) {
     return { url: link, source: 'console-link' };
   }
+
   return { url: originKeepingApiHost(fallbackUrl), source: 'fallback' };
 }
 
 async function tryList(
-  load: () => Promise<unknown>,
+  load: () => Promise<any>,
   onError: (err: unknown) => void,
-): Promise<unknown[]> {
+): Promise<any[]> {
   try {
     return itemsOf(await load());
   } catch (err) {
@@ -122,59 +110,53 @@ async function tryList(
   }
 }
 
-function itemsOf(response: unknown): unknown[] {
-  const record = asRecord(response);
-  if (Array.isArray(record.items)) {
-    return record.items;
+function itemsOf(response: any): any[] {
+  if (Array.isArray(response?.items)) {
+    return response.items;
   }
-  const body = asRecord(record.body);
-  if (Array.isArray(body.items)) {
-    return body.items;
+  if (Array.isArray(response?.body?.items)) {
+    return response.body.items;
   }
   return [];
 }
 
-function cheCandidates(items: unknown[]): string[] {
+function cheCandidates(items: any[]): string[] {
   const found: { url: string; rank: number }[] = [];
   for (const item of items) {
-    const record = asRecord(item);
-    const namespace = asRecord(record.metadata).namespace;
-    const url = cheUrl(record);
+    const url = cheUrl(item);
     if (!url) {
       continue;
     }
     found.push({
       url,
-      rank: namespace === 'openshift-devspaces' ? 0 : 1,
+      rank: item?.metadata?.namespace === 'openshift-devspaces' ? 0 : 1,
     });
   }
   found.sort((left, right) => left.rank - right.rank);
   return found.map((entry) => entry.url);
 }
 
-function cheUrl(cluster: Record<string, unknown>): string | undefined {
-  const status = asRecord(cluster.status);
-  if (typeof status.cheURL === 'string' && status.cheURL.trim()) {
-    return status.cheURL.trim();
+function cheUrl(cluster: any): string | undefined {
+  const statusUrl = cluster?.status?.cheURL;
+  if (typeof statusUrl === 'string' && statusUrl.trim()) {
+    return statusUrl.trim();
   }
-  const networking = asRecord(asRecord(cluster.spec).networking);
-  if (typeof networking.hostname === 'string' && networking.hostname.includes('.')) {
-    const hostname = networking.hostname.trim();
-    return hostname.includes('://') ? hostname : `https://${hostname}`;
+  const hostname = cluster?.spec?.networking?.hostname;
+  if (typeof hostname === 'string' && hostname.includes('.')) {
+    const trimmed = hostname.trim();
+    return trimmed.includes('://') ? trimmed : `https://${trimmed}`;
   }
   return undefined;
 }
 
-function routeCandidates(items: unknown[]): string[] {
+function routeCandidates(items: any[]): string[] {
   const found: { host: string; rank: number }[] = [];
   for (const item of items) {
-    const record = asRecord(item);
-    const name = asRecord(record.metadata).name;
-    const host = asRecord(record.spec).host;
+    const host = item?.spec?.host;
     if (typeof host !== 'string' || !host.includes('.')) {
       continue;
     }
-    const routeName = typeof name === 'string' ? name : '';
+    const routeName = typeof item?.metadata?.name === 'string' ? item.metadata.name : '';
     let rank = 2;
     if (routeName === 'devspaces' || routeName === 'che') {
       rank = 0;
@@ -189,19 +171,16 @@ function routeCandidates(items: unknown[]): string[] {
   return found.map((entry) => `https://${entry.host}`);
 }
 
-function consoleLinkCandidates(items: unknown[]): string[] {
+function consoleLinkCandidates(items: any[]): string[] {
   const hrefs: string[] = [];
   for (const item of items) {
-    const record = asRecord(item);
-    const name = asRecord(record.metadata).name;
-    const href = asRecord(record.spec).href;
+    const href = item?.spec?.href;
     if (typeof href !== 'string' || !href.trim()) {
       continue;
     }
-    const linkName = typeof name === 'string' ? name.toLowerCase() : '';
+    const linkName = typeof item?.metadata?.name === 'string' ? item.metadata.name.toLowerCase() : '';
     const trimmedHref = href.trim();
-    const lowerHref = trimmedHref.toLowerCase();
-    if (isDevSpacesConsoleLink(linkName, lowerHref)) {
+    if (isDevSpacesConsoleLink(linkName, trimmedHref.toLowerCase())) {
       hrefs.push(trimmedHref);
     }
   }
@@ -257,13 +236,6 @@ function publicOrigin(url: string, allowApiHost: boolean): string | undefined {
   } catch {
     return undefined;
   }
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  if (value && typeof value === 'object' && !Array.isArray(value)) {
-    return value as Record<string, unknown>;
-  }
-  return {};
 }
 
 function errorText(err: unknown): string {
