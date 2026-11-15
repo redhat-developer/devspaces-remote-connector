@@ -117,13 +117,25 @@ export class TokenManager {
     const baseKeys = tokenStorageKeys(clusterUrl, clusters, [
       clusterIdFromUrl(clusterUrl),
     ]);
-    const allKeys = [...baseKeys];
+    const allKeys: string[] = [];
+    const add = (val?: string) => {
+      if (val && !allKeys.includes(val)) {
+        allKeys.push(val);
+      }
+    };
     for (const key of baseKeys) {
+      add(key);
       if (key.includes('://')) {
-        const derivedId = clusterIdFromUrl(key);
-        if (derivedId && !allKeys.includes(derivedId)) {
-          allKeys.push(derivedId);
+        try {
+          const parsed = new URL(key);
+          add(parsed.origin);
+          if (parsed.protocol === 'https:' && !parsed.port) {
+            add(`https://${parsed.hostname}:443`);
+          }
+        } catch {
+          // Ignore non-URL keys.
         }
+        add(clusterIdFromUrl(key));
       }
     }
     return allKeys;
