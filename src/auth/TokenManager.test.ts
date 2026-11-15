@@ -1,4 +1,5 @@
 import { TokenManager, StoredToken } from './TokenManager';
+import { CLUSTERS_STATE_KEY } from '../kubernetes/knownApiUrl';
 
 describe('TokenManager', () => {
   let tokenManager: TokenManager;
@@ -181,33 +182,48 @@ class MemoryState {
 describe('TokenManager shared-ingress aliases', () => {
   const apiUrl = 'https://api.cluster.example.com:6443';
   const dashboardUrl = 'https://devspaces.apps.shared.example.com';
+  const appsDomain = 'apps.cluster.example.com';
 
-  it('finds a token stored under the API server when looking up the CheCluster host', async () => {
-    const manager = new TokenManager(new MemoryState() as any);
+  async function seedCluster(state: MemoryState): Promise<void> {
+    await state.update(CLUSTERS_STATE_KEY, [{
+      id: 'cluster',
+      apiUrl,
+      devSpacesUrl: dashboardUrl,
+      appsDomain,
+    }]);
+  }
+
+  it('finds a token stored under the API server when looking up the CheCluster host, appsDomain, or cluster id', async () => {
+    const state = new MemoryState();
+    const manager = new TokenManager(state as any);
     await manager.storeToken(apiUrl, {
       accessToken: 'sha256~from-api', // notsecret — test fixture only
       clusterUrl: apiUrl,
       expiresAt: Date.now() + 3600000,
     });
+    await seedCluster(state);
 
-    const found = await manager.getValidToken([dashboardUrl, apiUrl]);
-    expect(found?.accessToken).toBe('sha256~from-api'); // notsecret
+    expect((await manager.getValidToken(dashboardUrl))?.accessToken).toBe('sha256~from-api'); // notsecret
+    expect((await manager.getValidToken(appsDomain))?.accessToken).toBe('sha256~from-api'); // notsecret
+    expect((await manager.getValidToken('cluster'))?.accessToken).toBe('sha256~from-api'); // notsecret
     manager.dispose();
   });
 
-  it('copies the API-server token onto the shared-ingress dashboard host', async () => {
-    const manager = new TokenManager(new MemoryState() as any);
+  it('deletes all alias keys for a cluster from a single deleteToken call', async () => {
+    const state = new MemoryState();
+    await seedCluster(state);
+    const manager = new TokenManager(state as any);
     await manager.storeToken(apiUrl, {
       accessToken: 'sha256~from-api', // notsecret — test fixture only
       clusterUrl: apiUrl,
       expiresAt: Date.now() + 3600000,
     });
 
-    await manager.copyToken([apiUrl], dashboardUrl);
+    await manager.deleteToken(dashboardUrl);
 
-    const copied = await manager.getToken(dashboardUrl);
-    expect(copied?.accessToken).toBe('sha256~from-api'); // notsecret
-    expect(copied?.clusterUrl).toBe(dashboardUrl);
+    expect(await manager.getValidToken(apiUrl)).toBeUndefined();
+    expect(await manager.getValidToken(dashboardUrl)).toBeUndefined();
+    expect(await manager.getValidToken('cluster')).toBeUndefined();
     manager.dispose();
   });
 });

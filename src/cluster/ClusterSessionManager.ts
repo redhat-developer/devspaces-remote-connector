@@ -11,8 +11,8 @@ import { WorkspaceManager } from '../workspace/WorkspaceManager';
 import { WorkspaceTreeProvider } from '../ui/WorkspaceTreeProvider';
 import { ClusterManager } from './ClusterManager';
 import { STATE_CLUSTER_DISPLAY_URL, STATE_CLUSTER_URL } from '../constants';
-import { chooseDevSpacesUrl, readDevSpacesUrlSources } from '../auth/devSpacesUrl';
-import { KnownCluster, storedUrlNamesCluster, tokenStorageKeys } from '../kubernetes/knownApiUrl';
+import { resolveDevSpacesUrl } from '../auth/devSpacesUrl';
+import { KnownCluster, storedUrlNamesCluster } from '../kubernetes/knownApiUrl';
 
 const AUTO_REFRESH_INTERVAL = 15_000; // 15 seconds
 
@@ -56,8 +56,7 @@ export class ClusterSessionManager {
     this.cleanupStaleManager(clusterId);
 
     try {
-      const entry = this.clusterManager.getClusters().find((c) => c.id === clusterId);
-      const accessToken = await this.getClusterToken(clusterId, entry?.devSpacesUrl ?? clusterUrl, clusterUrl);
+      const accessToken = await this.getClusterToken(clusterId, clusterUrl);
       if (!accessToken) { return undefined; }
 
       const { apiUrl, devSpacesUrl, appsDomain } = await this.resolveClusterEndpoints(clusterId, clusterUrl);
@@ -70,11 +69,10 @@ export class ClusterSessionManager {
         appsDomain,
       }, clusterUrl);
 
-      await this.clusterManager.updateCluster(clusterId, { apiUrl, devSpacesUrl: resolvedDevSpacesUrl, appsDomain });
       this.treeProvider().setClusters(this.clusterManager.getClusters());
 
       const wm = this.createWorkspaceManager(kubeConfig, clusterId, resolvedDevSpacesUrl, accessToken);
-      await this.initializeWorkspaces(wm, clusterId, resolvedDevSpacesUrl, clusterUrl);
+      await this.initializeWorkspaces(wm, clusterId, resolvedDevSpacesUrl);
 
       this.workspaceManagers.set(clusterId, wm);
       this.startAutoRefresh(clusterId, wm);
@@ -109,15 +107,9 @@ export class ClusterSessionManager {
     return { apiUrl: endpoints.apiUrl, devSpacesUrl: endpoints.devSpacesUrl, appsDomain: endpoints.appsDomain };
   }
 
-  private async getClusterToken(clusterId: string, devSpacesUrl: string, clusterUrl: string): Promise<string | undefined> {
-    const entry = this.clusterManager.getClusters().find((cluster) => cluster.id === clusterId);
-    const token = await this.tokenManager.getValidToken(
-      tokenStorageKeys(clusterUrl, entry ? [entry] : this.clusterManager.getClusters(), [
-        clusterId,
-        devSpacesUrl,
-        entry?.apiUrl ?? '',
-      ]),
-    );
+  private async getClusterToken(clusterId: string, clusterUrl: string): Promise<string | undefined> {
+    const token = await this.tokenManager.getValidToken(clusterUrl)
+      ?? await this.tokenManager.getValidToken(clusterId);
     if (token) {
       return token.accessToken;
     }
@@ -132,16 +124,19 @@ export class ClusterSessionManager {
     clusterUrl: string,
   ): Promise<string> {
     const customApi = kubeConfig.makeApiClient(k8s.CustomObjectsApi);
-    const sources = await readDevSpacesUrlSources(
+    const chosen = await resolveDevSpacesUrl(
       customApi,
+      fallbackUrl,
       (message) => this.logger.debug(message),
     );
-    const chosen = chooseDevSpacesUrl(sources, fallbackUrl);
     this.logger.info(`Dev Spaces URL from ${chosen.source}: ${chosen.url}`);
-    await this.tokenManager.copyToken(
-      tokenStorageKeys(clusterUrl, [cluster], [clusterUrl, fallbackUrl]),
-      chosen.url,
-    );
+    if (cluster.id && cluster.apiUrl !== undefined && cluster.appsDomain !== undefined) {
+      await this.clusterManager.updateCluster(cluster.id, {
+        apiUrl: cluster.apiUrl,
+        devSpacesUrl: chosen.url,
+        appsDomain: cluster.appsDomain,
+      });
+    }
     const activeUrl = this.context.globalState.get<string>(STATE_CLUSTER_URL);
     if (chosen.source !== 'fallback' && storedUrlNamesCluster(activeUrl, cluster, [clusterUrl, fallbackUrl])) {
       await this.context.globalState.update(STATE_CLUSTER_URL, chosen.url);
@@ -160,7 +155,7 @@ export class ClusterSessionManager {
     return wm;
   }
 
-  private async initializeWorkspaces(wm: WorkspaceManager, clusterId: string, devSpacesUrl: string, clusterUrl: string): Promise<void> {
+  private async initializeWorkspaces(wm: WorkspaceManager, clusterId: string, devSpacesUrl: string): Promise<void> {
     const tp = this.treeProvider();
     wm.onDidChangeWorkspaces(() => {
       if (!this.isInitializing) {
@@ -168,14 +163,8 @@ export class ClusterSessionManager {
       }
     });
 
-    const entry = this.clusterManager.getClusters().find((cluster) => cluster.id === clusterId);
-    const tokenData = await this.tokenManager.getValidToken(
-      tokenStorageKeys(clusterUrl, entry ? [entry] : this.clusterManager.getClusters(), [
-        clusterId,
-        devSpacesUrl,
-        entry?.apiUrl ?? '',
-      ]),
-    );
+    const tokenData = await this.tokenManager.getValidToken(devSpacesUrl)
+      ?? await this.tokenManager.getValidToken(clusterId);
     const username = tokenData?.username;
     if (username) {
       await wm.initialize(username);

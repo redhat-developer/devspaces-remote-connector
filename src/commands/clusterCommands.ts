@@ -5,7 +5,7 @@ import { WorkspaceTreeProvider } from '../ui/WorkspaceTreeProvider';
 import { ClusterTreeItem } from '../ui/WorkspaceTreeItem';
 import { TokenManager } from '../auth/TokenManager';
 import { OpenShiftAuthProvider } from '../auth/OpenShiftAuthProvider';
-import { storedUrlNamesCluster, tokenStorageKeys } from '../kubernetes/knownApiUrl';
+import { storedUrlNamesCluster } from '../kubernetes/knownApiUrl';
 import { STATE_CLUSTER_URL, STATE_CLUSTER_DISPLAY_URL, STATE_ACTIVE_CONNECTION, CTX_AUTHENTICATED, CTX_CONNECTED } from '../constants';
 
 export interface ClusterCommandsDeps {
@@ -103,12 +103,9 @@ export function registerClusterCommands(deps: ClusterCommandsDeps): void {
         }
 
         await cleanupConnection(true);
+        // Clear stored credentials for all aliases before removing cluster mapping
+        await tokenManager.deleteToken(cluster.devSpacesUrl);
         await clusterManager.removeCluster(cluster.id);
-
-        // Clear stored credentials for all aliases of this cluster
-        for (const key of tokenStorageKeys(cluster.devSpacesUrl, [cluster])) {
-          await tokenManager.deleteToken(key);
-        }
 
         // Clear stored cluster URL if it belongs to the removed cluster
         const storedUrl = context.globalState.get<string>(STATE_CLUSTER_URL);
@@ -188,9 +185,7 @@ export function registerClusterCommands(deps: ClusterCommandsDeps): void {
         }
       }
 
-      for (const key of tokenStorageKeys(cluster.devSpacesUrl, [cluster])) {
-        await tokenManager.deleteToken(key);
-      }
+      await tokenManager.deleteToken(cluster.devSpacesUrl);
 
       const wm = clusterWorkspaceManagers.get(cluster.id);
       if (wm) {

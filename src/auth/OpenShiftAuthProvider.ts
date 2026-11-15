@@ -3,8 +3,8 @@ import { Logger } from '../util/Logger';
 import { TokenManager, StoredToken } from './TokenManager';
 import { OAuthFlow } from './OAuthFlow';
 import { ClusterDiscovery, ClusterEndpoints } from './ClusterDiscovery';
-import { CLUSTERS_STATE_KEY, KnownCluster, lookupKnownApiUrl, storedUrlNamesCluster, tokenStorageKeys } from '../kubernetes/knownApiUrl';
-import { clusterIdFromUrl } from '../cluster/clusterId';
+import { getClusters } from '../cluster/ClusterManager';
+import { CLUSTERS_STATE_KEY, lookupKnownApiUrl, storedUrlNamesCluster } from '../kubernetes/knownApiUrl';
 import { getJson } from '../util/httpClient';
 import {
   CTX_AUTHENTICATED,
@@ -65,11 +65,12 @@ export class OpenShiftAuthProvider implements vscode.AuthenticationProvider, vsc
     );
 
     const lifetimeMs = expiresIn ? expiresIn * 1000 : 24 * 60 * 60 * 1000;
+    const existing = await this.tokenManager.getToken(clusterUrl);
     const newToken: StoredToken = {
       accessToken,
       clusterUrl,
       expiresAt: Date.now() + lifetimeMs,
-      username: await this.usernameFromStored(clusterUrl),
+      username: existing?.username,
     };
 
     await this.persistToken(newToken, clusterUrl);
@@ -90,7 +91,7 @@ export class OpenShiftAuthProvider implements vscode.AuthenticationProvider, vsc
       return [];
     }
 
-    const token = await this.tokenManager.getValidToken(this.clusterTokenKeys(clusterUrl));
+    const token = await this.tokenManager.getValidToken(clusterUrl);
     if (!token) {
       await vscode.commands.executeCommand('setContext', CTX_AUTHENTICATED, false);
       return [];
@@ -102,7 +103,7 @@ export class OpenShiftAuthProvider implements vscode.AuthenticationProvider, vsc
       this.logger.debug('Token needs refresh, triggering silent re-auth');
       try {
         await this.silentReauthenticate();
-        const refreshed = await this.tokenManager.getValidToken(this.clusterTokenKeys(clusterUrl));
+        const refreshed = await this.tokenManager.getValidToken(clusterUrl);
         if (refreshed) {
           return [this.tokenToSession(refreshed)];
         }
@@ -175,12 +176,8 @@ export class OpenShiftAuthProvider implements vscode.AuthenticationProvider, vsc
   async removeSession(_sessionId: string): Promise<void> {
     const clusterUrl = this.getStoredClusterUrl();
     if (clusterUrl) {
-      const keys = this.clusterTokenKeys(clusterUrl);
-      const token = await this.tokenManager.getValidToken(keys)
-        ?? await this.firstStoredToken(clusterUrl);
-      for (const key of keys) {
-        await this.tokenManager.deleteToken(key);
-      }
+      const token = await this.tokenManager.getToken(clusterUrl);
+      await this.tokenManager.deleteToken(clusterUrl);
       if (token) {
         const session = this.tokenToSession(token);
         this.sessionChangeEmitter.fire({
@@ -205,12 +202,12 @@ export class OpenShiftAuthProvider implements vscode.AuthenticationProvider, vsc
       throw new Error('Not authenticated. Please sign in first.');
     }
 
-    let token = await this.tokenManager.getValidToken(this.clusterTokenKeys(clusterUrl));
+    let token = await this.tokenManager.getValidToken(clusterUrl);
 
     if (token && this.tokenManager.needsRefresh(token)) {
       try {
         await this.silentReauthenticate();
-        const refreshed = await this.tokenManager.getValidToken(this.clusterTokenKeys(clusterUrl));
+        const refreshed = await this.tokenManager.getValidToken(clusterUrl);
         if (refreshed) {
           token = refreshed;
         }
@@ -259,7 +256,7 @@ export class OpenShiftAuthProvider implements vscode.AuthenticationProvider, vsc
       this.logger.warn(`Failed to restore cluster endpoints: ${err}`);
     }
 
-    const token = await this.tokenManager.getValidToken(this.clusterTokenKeys(clusterUrl));
+    const token = await this.tokenManager.getValidToken(clusterUrl);
     if (!token) {
       await vscode.commands.executeCommand('setContext', CTX_AUTHENTICATED, false);
       this.logger.info(`Stored token missing or expired for ${clusterUrl} — Sign In, do not Clear Auth`);
@@ -277,8 +274,7 @@ export class OpenShiftAuthProvider implements vscode.AuthenticationProvider, vsc
    * that does not exist, and activation waits on that lookup.
    */
   private urlToDiscover(clusterUrl: string): string {
-    const clusters = this.context.globalState.get<KnownCluster[]>(CLUSTERS_STATE_KEY);
-    return lookupKnownApiUrl(clusters, clusterUrl) || clusterUrl;
+    return lookupKnownApiUrl(getClusters(this.context.globalState), clusterUrl) || clusterUrl;
   }
 
   /**
@@ -349,7 +345,7 @@ export class OpenShiftAuthProvider implements vscode.AuthenticationProvider, vsc
     if (!endpoints.apiUrl) {
       return;
     }
-    const clusters = this.context.globalState.get<KnownCluster[]>(CLUSTERS_STATE_KEY) ?? [];
+    const clusters = getClusters(this.context.globalState);
     let changed = false;
     for (const cluster of clusters) {
       if (storedUrlNamesCluster(clusterUrl, cluster)) {
@@ -368,46 +364,15 @@ export class OpenShiftAuthProvider implements vscode.AuthenticationProvider, vsc
     }
   }
 
-  private async usernameFromStored(clusterUrl: string): Promise<string | undefined> {
-    const token = await this.firstStoredToken(clusterUrl);
-    return token?.username;
-  }
-
-  private async firstStoredToken(clusterUrl: string): Promise<StoredToken | undefined> {
-    for (const key of this.clusterTokenKeys(clusterUrl)) {
-      const stored = await this.tokenManager.getToken(key);
-      if (stored) {
-        return stored;
-      }
-    }
-    return undefined;
-  }
-
   private async storeClusterUrl(url: string): Promise<void> {
     await this.context.globalState.update(STATE_CLUSTER_URL, url);
   }
 
-  /**
-   * Keys the OpenShift token may be stored under after a shared-ingress
-   * dashboard rewrite. Connect looks up STATE_CLUSTER_URL, which becomes
-   * cheURL; the token itself was saved under the API server.
-   */
-  private clusterTokenKeys(clusterUrl: string): string[] {
-    return tokenStorageKeys(
-      clusterUrl,
-      this.context.globalState.get<KnownCluster[]>(CLUSTERS_STATE_KEY),
-      [
-        this.endpoints?.apiUrl,
-        this.endpoints?.devSpacesUrl,
-        this.endpoints?.appsDomain,
-        clusterIdFromUrl(this.endpoints?.apiUrl || clusterUrl),
-      ].filter((value): value is string => Boolean(value)),
-    );
-  }
-
   private async persistToken(token: StoredToken, clusterUrl: string): Promise<void> {
-    for (const key of this.clusterTokenKeys(clusterUrl)) {
-      await this.tokenManager.storeToken(key, { ...token, clusterUrl: key });
+    const storeKey = this.endpoints?.apiUrl || clusterUrl;
+    await this.tokenManager.storeToken(storeKey, { ...token, clusterUrl: storeKey });
+    if (storeKey !== clusterUrl) {
+      await this.tokenManager.storeToken(clusterUrl, token);
     }
     await this.storeClusterUrl(clusterUrl);
   }

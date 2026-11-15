@@ -94,37 +94,45 @@ export class ClusterDiscovery {
   }
 
   /**
-   * Provisional dashboard URL from whatever the user typed.
+   * Provisional dashboard URL from whatever URL was supplied.
    *
    * A dashboard, console, or CNAME host is kept as-is so a shared ingress is
-   * not rewritten. An API server host is not a dashboard: the provisional
-   * value is `https://devspaces.<apps-domain>`, and ClusterSessionManager
-   * replaces it with the CheCluster route after login.
+   * not rewritten. An API server host (`api.*` or `:6443`) is not a dashboard:
+   * derive a provisional `https://devspaces.apps.<cluster-domain>` host, which
+   * ClusterSessionManager replaces with the CheCluster route after login.
    */
   buildDevSpacesUrl(baseUrl: string): string {
     const normalized = this.normalizeInputUrl(baseUrl);
-    let hostname: string;
+    let parsed: URL;
     try {
-      hostname = new URL(normalized).hostname;
+      parsed = new URL(normalized);
     } catch {
       return normalized;
     }
-    if (!hostname.startsWith('api.')) {
+    if (!this.isApiServerUrl(parsed)) {
       return normalized;
     }
 
-    const clusterDomain = hostname.slice('api.'.length);
-    return `https://devspaces.apps.${clusterDomain}`;
+    const hostname = parsed.hostname;
+    if (hostname.startsWith('api.')) {
+      return `https://devspaces.apps.${hostname.slice('api.'.length)}`;
+    }
+    const dotIdx = hostname.indexOf('.');
+    if (dotIdx !== -1) {
+      return `https://devspaces.apps.${hostname.slice(dotIdx + 1)}`;
+    }
+    return `https://${hostname}`;
   }
 
   /**
-   * Keep an API server URL the user pasted. Guessing the API from the apps
-   * domain drops the port and fails when the dashboard is on a shared ingress.
+   * Keep an API server URL (`api.*` or `:6443`) supplied directly by the user
+   * or restored from `cluster.apiUrl` on session reload. Guessing the API from
+   * the apps domain drops custom ports and fails on a shared ingress.
    */
   resolveApiUrl(inputUrl: string, discoveredApiUrl: string): string {
     const normalized = this.normalizeInputUrl(inputUrl);
     try {
-      if (new URL(normalized).hostname.startsWith('api.')) {
+      if (this.isApiServerUrl(new URL(normalized))) {
         return normalized;
       }
     } catch {
@@ -133,29 +141,28 @@ export class ClusterDiscovery {
     return discoveredApiUrl;
   }
 
+  private isApiServerUrl(parsed: URL): boolean {
+    return parsed.hostname.startsWith('api.') || parsed.port === '6443';
+  }
+
   /**
-   * Discover cluster endpoints from any URL the user provides.
+   * Discover cluster endpoints from a user-supplied URL or a stored `apiUrl`.
    *
-   * An API server URL is used as-is. A Dev Spaces / shared-ingress URL is not
-   * a Kubernetes server: guessing `api.` or `console-openshift-console.` from
-   * that host hangs. Follow `/oauth/start` to the real `oauth-openshift` apps
-   * domain, or ask for the API URL.
+   * An API server URL (`api.*` or `:6443`) is used directly without probing the
+   * console route. A Dev Spaces / shared-ingress URL is not a Kubernetes
+   * server: follow `/oauth/start` to the `oauth-openshift` apps domain, or ask
+   * for the API URL.
    */
   async discover(inputUrl: string): Promise<ClusterEndpoints> {
     this.logger.info(`Discovering cluster endpoints from: ${inputUrl}`);
 
     const baseUrl = this.normalizeInputUrl(inputUrl);
-    const pastedApi = this.resolveApiUrl(baseUrl, '');
-    const appsDomain = pastedApi
+    const directApiUrl = this.resolveApiUrl(baseUrl, '');
+    const appsDomain = directApiUrl
       ? (this.extractAppsDomain(baseUrl) ?? '')
       : await this.resolveAppsDomainFromDashboard(baseUrl);
 
-    let apiUrl: string;
-    if (pastedApi) {
-      apiUrl = pastedApi;
-    } else {
-      apiUrl = await this.buildKubeAPIServerURL(appsDomain);
-    }
+    const apiUrl = directApiUrl || await this.buildKubeAPIServerURL(appsDomain);
     const devSpacesUrl = this.buildDevSpacesUrl(baseUrl);
 
     this.logger.debug(`Apps domain: ${appsDomain}`);

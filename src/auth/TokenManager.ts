@@ -1,6 +1,9 @@
 import * as vscode from 'vscode';
 import { Logger } from '../util/Logger';
 import { TOKEN_REFRESH_BUFFER } from '../constants';
+import { getClusters } from '../cluster/ClusterManager';
+import { clusterIdFromUrl } from '../cluster/clusterId';
+import { tokenStorageKeys } from '../kubernetes/knownApiUrl';
 
 export interface StoredToken {
   accessToken: string;
@@ -55,12 +58,17 @@ export class TokenManager {
     this.scheduleRefresh(token);
   }
 
-  async getValidToken(keys: string[]): Promise<StoredToken | undefined> {
-    for (const key of keys) {
-      if (!key) {
-        continue;
-      }
-      const stored = await this.getToken(key);
+  /**
+   * Look up a non-expired token for `clusterUrl`, checking all stored aliases
+   * (API server URL, CheCluster dashboard URL, apps domain, and cluster ID)
+   * registered in `globalState`.
+   */
+  async getValidToken(clusterUrl: string): Promise<StoredToken | undefined> {
+    if (!clusterUrl) {
+      return undefined;
+    }
+    for (const key of this.keysFor(clusterUrl)) {
+      const stored = await this.readExactToken(key);
       if (stored && this.isTokenValid(stored)) {
         return stored;
       }
@@ -68,45 +76,57 @@ export class TokenManager {
     return undefined;
   }
 
-  /**
-   * Copy a valid token onto another lookup key (the CheCluster dashboard host).
-   */
-  async copyToken(fromKeys: string[], toKey: string): Promise<void> {
-    const target = toKey.trim();
-    if (!target) {
-      return;
+  async getToken(clusterUrl: string): Promise<StoredToken | undefined> {
+    if (!clusterUrl) {
+      return undefined;
     }
-    const existing = await this.getToken(target);
-    if (existing && this.isTokenValid(existing)) {
-      return;
+    for (const key of this.keysFor(clusterUrl)) {
+      const stored = await this.readExactToken(key);
+      if (stored) {
+        return stored;
+      }
     }
-    const token = await this.getValidToken(fromKeys);
-    if (!token) {
-      return;
-    }
-    await this.storeToken(target, { ...token, clusterUrl: target });
+    return undefined;
   }
 
-  async getToken(clusterUrl: string): Promise<StoredToken | undefined> {
-    const key = this.keyFor(clusterUrl);
-    const raw = this.globalState.get<string>(key);
+  async deleteToken(clusterUrl: string): Promise<void> {
+    for (const key of this.keysFor(clusterUrl)) {
+      await this.globalState.update(this.keyFor(key), undefined);
+    }
+    this.logger.debug(`Token deleted for ${clusterUrl}`);
+    this.cancelRefreshTimer();
+  }
+
+  private async readExactToken(key: string): Promise<StoredToken | undefined> {
+    const storageKey = this.keyFor(key);
+    const raw = this.globalState.get<string>(storageKey);
     if (!raw) {
       return undefined;
     }
     try {
       return JSON.parse(raw) as StoredToken;
     } catch {
-      this.logger.warn(`Corrupt token data for ${clusterUrl}, clearing`);
-      await this.deleteToken(clusterUrl);
+      this.logger.warn(`Corrupt token data for ${key}, clearing`);
+      await this.globalState.update(storageKey, undefined);
       return undefined;
     }
   }
 
-  async deleteToken(clusterUrl: string): Promise<void> {
-    const key = this.keyFor(clusterUrl);
-    await this.globalState.update(key, undefined);
-    this.logger.debug(`Token deleted for ${clusterUrl}`);
-    this.cancelRefreshTimer();
+  private keysFor(clusterUrl: string): string[] {
+    const clusters = getClusters(this.globalState);
+    const baseKeys = tokenStorageKeys(clusterUrl, clusters, [
+      clusterIdFromUrl(clusterUrl),
+    ]);
+    const allKeys = [...baseKeys];
+    for (const key of baseKeys) {
+      if (key.includes('://')) {
+        const derivedId = clusterIdFromUrl(key);
+        if (derivedId && !allKeys.includes(derivedId)) {
+          allKeys.push(derivedId);
+        }
+      }
+    }
+    return allKeys;
   }
 
   isTokenValid(token: StoredToken): boolean {

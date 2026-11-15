@@ -101,15 +101,21 @@ describe('ClusterDiscovery', () => {
     it('does not use an API server URL as the dashboard', () => {
       expect(discovery.buildDevSpacesUrl('https://api.cluster.example.com:6443'))
         .toBe('https://devspaces.apps.cluster.example.com');
+      expect(discovery.buildDevSpacesUrl('https://k8s.corp.example.com:6443'))
+        .toBe('https://devspaces.apps.corp.example.com');
     });
   });
 
   describe('resolveApiUrl', () => {
-    it('keeps the API server URL the user typed', () => {
+    it('keeps the API server URL the user typed or stored', () => {
       expect(discovery.resolveApiUrl(
         'https://api.cluster.example.com:6443',
         'https://api.cluster.example.com:443',
       )).toBe('https://api.cluster.example.com:6443');
+      expect(discovery.resolveApiUrl(
+        'https://k8s.corp.example.com:6443',
+        '',
+      )).toBe('https://k8s.corp.example.com:6443');
     });
 
     it('uses the discovered API server for a dashboard URL', () => {

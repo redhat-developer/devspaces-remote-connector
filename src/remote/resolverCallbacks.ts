@@ -9,7 +9,8 @@ import {
   waitForWorkspacePhase,
 } from '../kubernetes/KubeAuthHelper';
 import { DW_API_GROUP, DW_API_VERSION, DW_PLURAL } from '../constants';
-import { CLUSTERS_STATE_KEY, KnownCluster, lookupKnownApiUrl } from '../kubernetes/knownApiUrl';
+import { ClusterManager } from '../cluster/ClusterManager';
+import { lookupKnownApiUrl } from '../kubernetes/knownApiUrl';
 import { DevWorkspaceResource } from '../kubernetes/DevWorkspaceTypes';
 
 const logger = Logger.getInstance();
@@ -18,7 +19,7 @@ const logger = Logger.getInstance();
  * Creates the getKubeConfig callback for the DevSpacesResolver.
  */
 export function createGetKubeConfig(
-  globalState: { get<T>(key: string): T | undefined },
+  clusterManager: Pick<ClusterManager, 'getClusters'>,
   tokenManager: TokenManager,
   kubeFactory: KubeClientFactory,
   clusterDiscovery: ClusterDiscovery
@@ -27,7 +28,7 @@ export function createGetKubeConfig(
 
   return async (clusterUrl: string, extraKeys: string[] = []): Promise<k8s.KubeConfig | undefined> => {
     logger.debug(`Resolver getKubeConfig: clusterUrl=${clusterUrl}${extraKeys.length ? `, extraKeys=[${extraKeys.join(',')}]` : ''}`);
-    const knownApi = lookupKnownApiUrl(storedClusters(globalState), clusterUrl, extraKeys);
+    const knownApi = lookupKnownApiUrl(clusterManager.getClusters(), clusterUrl, extraKeys);
     return helper.getKubeConfig(clusterUrl, extraKeys, knownApi);
   };
 }
@@ -49,7 +50,7 @@ export function createFindPodAndContainer() {
  * Creates the checkAndStartWorkspace callback for the DevSpacesResolver.
  */
 export function createCheckAndStartWorkspace(
-  globalState: { get<T>(key: string): T | undefined },
+  clusterManager: Pick<ClusterManager, 'getClusters'>,
   tokenManager: TokenManager,
   kubeFactory: KubeClientFactory,
   clusterDiscovery: ClusterDiscovery
@@ -63,7 +64,7 @@ export function createCheckAndStartWorkspace(
     extraKeys: string[] = []
   ): Promise<'running' | 'started' | 'failed' | 'auth_failed' | 'not_found'> => {
     try {
-      const knownApi = lookupKnownApiUrl(storedClusters(globalState), clusterUrl, extraKeys);
+      const knownApi = lookupKnownApiUrl(clusterManager.getClusters(), clusterUrl, extraKeys);
       const tokenKeys = knownApi ? [...extraKeys, knownApi] : extraKeys;
       const accessToken = await helper.resolveToken(clusterUrl, tokenKeys);
       if (!accessToken) { return 'auth_failed'; }
@@ -130,10 +131,6 @@ export function createCheckAndStartWorkspace(
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
-
-function storedClusters(globalState: { get<T>(key: string): T | undefined }): KnownCluster[] {
-  return globalState.get<KnownCluster[]>(CLUSTERS_STATE_KEY) ?? [];
-}
 
 /**
  * Detect a 404 Not Found error from the Kubernetes client.
