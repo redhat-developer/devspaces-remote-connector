@@ -226,4 +226,29 @@ describe('TokenManager shared-ingress aliases', () => {
     expect(await manager.getValidToken('cluster')).toBeUndefined();
     manager.dispose();
   });
+
+  it('matches ROSA :443 API server tokens after URL.origin strips default HTTPS port 443', async () => {
+    const state = new MemoryState();
+    const rosaApiWithPort = 'https://api.rosa-rwx5g.f8y9.p3.openshiftapps.com:443';
+    const rosaApiOrigin = 'https://api.rosa-rwx5g.f8y9.p3.openshiftapps.com';
+    const rosaCheUrl = 'https://devspaces.apps.rosa.rosa-rwx5g.f8y9.p3.openshiftapps.com';
+
+    await state.update(CLUSTERS_STATE_KEY, [{
+      id: 'rosa-rwx5g',
+      apiUrl: rosaApiOrigin,
+      devSpacesUrl: rosaCheUrl,
+      appsDomain: 'apps.rosa-rwx5g.f8y9.p3.openshiftapps.com',
+    }]);
+
+    const manager = new TokenManager(state as any);
+    await manager.storeToken(rosaApiWithPort, {
+      accessToken: 'sha256~rosa-token', // notsecret — test fixture only
+      clusterUrl: rosaApiWithPort,
+      expiresAt: Date.now() + 3600000,
+    });
+
+    expect((await manager.getValidToken(rosaCheUrl))?.accessToken).toBe('sha256~rosa-token'); // notsecret
+    expect((await manager.getValidToken(rosaApiOrigin))?.accessToken).toBe('sha256~rosa-token'); // notsecret
+    manager.dispose();
+  });
 });
