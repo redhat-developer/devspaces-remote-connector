@@ -95,6 +95,9 @@ jobs:
   release-job:
     environment: ${{ inputs.publishToOVSX == 'true' && 'release' || 'pre-release' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     needs: packaging-job
     steps:
       - name: Set Up NodeJS
@@ -109,7 +112,7 @@ jobs:
       - name: Publish to OpenVSX Registry
         if: ${{ github.event_name == 'schedule' || inputs.publishToOVSX == 'true' || inputs.publishPreRelease == 'true' }}
         run: |
-          ovsx publish --skip-duplicate -p ${{ secrets.OVSX_MARKETPLACE_TOKEN }}  --packagePath devspaces-remote-connector-*-${GITHUB_RUN_NUMBER}.vsix
+          ovsx publish --skip-duplicate --trusted-publishing --packagePath devspaces-remote-connector-*-${GITHUB_RUN_NUMBER}.vsix
       - name: Delete saved artifact
         uses: geekyeggo/delete-artifact@e46cfb9575865f907c2beb2e4170b5f4c7d77c52
         with:
