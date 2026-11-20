@@ -55,7 +55,7 @@ export function registerAuthCommands(deps: AuthCommandsDeps): void {
           });
           if (!url) { return; }
           const entry = await clusterManager.addCluster(url.trim());
-          context.globalState.update(STATE_CLUSTER_URL, entry.devSpacesUrl);
+          await context.globalState.update(STATE_CLUSTER_URL, entry.devSpacesUrl);
         }
 
         // Trigger sign-in directly (bypasses VS Code consent dialog)
@@ -94,12 +94,10 @@ export function registerAuthCommands(deps: AuthCommandsDeps): void {
       }
 
       try {
-        // Remove tokens (stored under multiple keys)
+        // Remove tokens (resolves all stored aliases via cluster mappings)
         const clusters = clusterManager.getClusters();
         for (const cluster of clusters) {
           await tokenManager.deleteToken(cluster.devSpacesUrl);
-          await tokenManager.deleteToken(cluster.id);
-          await tokenManager.deleteToken(cluster.appsDomain);
         }
         const legacyUrl = context.globalState.get<string>(STATE_CLUSTER_URL);
         if (legacyUrl) {

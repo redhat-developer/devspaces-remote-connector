@@ -45,7 +45,7 @@ graph TB
 - **`WorkspaceModel`** carries a `clusterId` — every workspace knows which cluster it belongs to. No scanning required.
 - **`KubeClientFactory`** is stateless — each operation builds its own `KubeConfig` from the cluster's `apiUrl` + token. No shared state between clusters.
 - **`ClusterSessionManager`** manages per-cluster workspace sessions, each with its own API clients and refresh interval.
-- **ConsoleLink discovery** — after auth, queries OpenShift `ConsoleLink` CRs to find the real DevSpaces URL (handles custom domains/CNAMEs).
+- **Dashboard URL** — after auth, reads CheCluster `status.cheURL` (the shared-ingress route), then the Dev Spaces route, then the OpenShift `ConsoleLink`. A URL guessed from the API server name is only a fallback.
 - **Token storage** — tokens are keyed by `appsDomain` (the cluster's stable identifier), so any URL from the same cluster resolves to the same token.
 
 ## Authentication Flow
@@ -88,7 +88,7 @@ When a user clicks **Connect** on a workspace:
 The new window activates the extension, which registers a `RemoteAuthorityResolver` for the `devspaces` authority:
 
 1. **Read connection info** from globalState (workspace name, namespace, devworkspaceId, cluster URL)
-2. **Build KubeConfig** from the cached OAuth token + discovered API server URL
+2. **Build KubeConfig** from the cached OAuth token and the API server saved at sign-in. The connection URL may be a shared-ingress dashboard, which is not used to guess the API.
 3. **Find the pod** by label selector `controller.devfile.io/devworkspace_id=<id>` — retries for up to 2 minutes if pod is not yet ready
 4. **Identify the main container** by reading the DevWorkspace CR and finding the component with `mountSources: true`
 

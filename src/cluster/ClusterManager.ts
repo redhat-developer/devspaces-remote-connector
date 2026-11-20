@@ -2,6 +2,8 @@ import * as vscode from 'vscode';
 import { Logger } from '../util/Logger';
 import { ClusterDiscovery } from '../auth/ClusterDiscovery';
 import { STATE_CLUSTER_URL, STATE_CLUSTER_DISPLAY_URL } from '../constants';
+import { CLUSTERS_STATE_KEY, storedUrlNamesCluster } from '../kubernetes/knownApiUrl';
+import { clusterIdFromUrl } from './clusterId';
 
 /**
  * A registered DevSpaces cluster with all resolved endpoints.
@@ -23,7 +25,15 @@ export interface ClusterEntry {
   username?: string;
 }
 
-const STORAGE_KEY = 'devspaces.clusters';
+const STORAGE_KEY = CLUSTERS_STATE_KEY;
+
+/**
+ * Read registered clusters from globalState without instantiating ClusterManager.
+ */
+export function getClusters(globalState: { get<T>(key: string): T | undefined }): ClusterEntry[] {
+  const stored = globalState.get<ClusterEntry[]>(STORAGE_KEY);
+  return Array.isArray(stored) ? stored : [];
+}
 
 /**
  * Manages the list of registered DevSpaces clusters.
@@ -79,7 +89,7 @@ export class ClusterManager {
     const storedUrl = this.globalState.get<string>(STATE_CLUSTER_URL);
     const allClusters = this.getClusters();
     if (allClusters.length > 0) {
-      if (!storedUrl || !allClusters.some((c) => c.devSpacesUrl === storedUrl)) {
+      if (!storedUrl || !allClusters.some((c) => storedUrlNamesCluster(storedUrl, c))) {
         await this.globalState.update(STATE_CLUSTER_URL, allClusters[0].devSpacesUrl);
         this.logger.info(`Set clusterUrl to ${allClusters[0].devSpacesUrl}`);
       }
@@ -90,37 +100,45 @@ export class ClusterManager {
    * Get all registered clusters.
    */
   getClusters(): ClusterEntry[] {
-    return this.globalState.get<ClusterEntry[]>(STORAGE_KEY, []);
+    return getClusters(this.globalState);
   }
 
   async addCluster(url: string, endpoints?: { apiUrl: string; devSpacesUrl: string; appsDomain: string }): Promise<ClusterEntry> {
     const normalizedUrl = this.normalizeUrl(url);
+    const discovery = new ClusterDiscovery();
+
+    // Preserve a pasted API server URL so sign-in does not have to guess it
+    // back from a provisional or shared-ingress dashboard URL.
+    const apiUrl = endpoints?.apiUrl || discovery.resolveApiUrl(normalizedUrl, '');
 
     // Derive proper devSpacesUrl from any URL format
     let devSpacesUrl = endpoints?.devSpacesUrl ?? normalizedUrl;
     let appsDomain = endpoints?.appsDomain ?? '';
     if (!endpoints) {
-      const discovery = new ClusterDiscovery();
       const extracted = discovery.extractAppsDomain(normalizedUrl);
       if (extracted) {
         appsDomain = extracted;
-        devSpacesUrl = discovery.buildDevSpacesUrl(normalizedUrl);
       }
+      devSpacesUrl = discovery.buildDevSpacesUrl(normalizedUrl);
     }
 
     const id = this.urlToId(devSpacesUrl);
     const displayName = this.computeDisplayName(devSpacesUrl);
 
     const clusters = this.getClusters();
-    const existing = clusters.find((c) => c.id === id);
+    const existing = clusters.find((c) => c.id === id || (Boolean(apiUrl) && c.apiUrl === apiUrl));
     if (existing) {
+      if (apiUrl && existing.apiUrl !== apiUrl) {
+        existing.apiUrl = apiUrl;
+        await this.globalState.update(STORAGE_KEY, clusters);
+      }
       this.logger.info(`Cluster already registered: ${existing.displayName}`);
       return existing;
     }
 
     const entry: ClusterEntry = {
       id,
-      apiUrl: endpoints?.apiUrl ?? '',
+      apiUrl,
       devSpacesUrl,
       appsDomain,
       displayName,
@@ -151,6 +169,7 @@ export class ClusterManager {
     entry.apiUrl = endpoints.apiUrl;
     entry.devSpacesUrl = endpoints.devSpacesUrl;
     entry.appsDomain = endpoints.appsDomain;
+    entry.displayName = this.computeDisplayName(endpoints.devSpacesUrl);
     await this.globalState.update(STORAGE_KEY, clusters);
     this.logger.debug(`Cluster ${id} updated: api=${endpoints.apiUrl}, devspaces=${endpoints.devSpacesUrl}`);
   }
@@ -179,7 +198,12 @@ export class ClusterManager {
       const settingsClusters = config.get<string[]>('clusters', []);
       const filtered = settingsClusters.filter((u) => {
         const normalized = this.normalizeUrl(u);
-        return normalized !== removed.devSpacesUrl && normalized !== this.normalizeUrl(removed.devSpacesUrl);
+        return (
+          normalized !== removed.devSpacesUrl &&
+          normalized !== this.normalizeUrl(removed.devSpacesUrl) &&
+          !storedUrlNamesCluster(normalized, removed) &&
+          this.urlToId(normalized) !== removed.id
+        );
       });
       if (filtered.length !== settingsClusters.length) {
         await config.update('clusters', filtered, vscode.ConfigurationTarget.Global);
@@ -200,12 +224,9 @@ export class ClusterManager {
       if (!hostname.includes('.openshiftapps.com') && !hostname.includes('.p1.')) {
         return hostname;
       }
-      // Long ROSA URLs — extract cluster name
       // e.g. devspaces.apps.devspc02-1d.zs5b.p1.openshiftapps.com → devspaces@devspc02-1d
-      const appsIdx = hostname.indexOf('.apps.');
-      if (appsIdx !== -1) {
-        const appsDomain = hostname.slice(appsIdx + 1); // apps.devspc02-1d.zs5b...
-        const clusterName = appsDomain.replace(/^apps\./, '').split('.')[0];
+      const clusterName = clusterIdFromUrl(url);
+      if (!clusterName.includes('.')) {
         return `devspaces@${clusterName}`;
       }
       return hostname;
@@ -232,32 +253,10 @@ export class ClusterManager {
 
   /**
    * Generate a stable ID from a URL.
-   * Extracts the cluster short prefix from OpenShift apps domains.
-   * e.g. apps.devspc-1d.ctyz.p1.openshiftapps.com → devspc-1d
-   * For CNAMEs like devspaces.example.com → devspaces.example.com (keep as-is)
+   * Standard OpenShift apps domains use the cluster name.
+   * Shared-ingress hosts must not share one id across clusters.
    */
   urlToId(url: string): string {
-    try {
-      const hostname = new URL(url).hostname;
-      // Match apps.<cluster-prefix>.<random>.<suffix> pattern (at least 2 segments after prefix)
-      const appsIdx = hostname.indexOf('.apps.');
-      if (appsIdx !== -1) {
-        const afterApps = hostname.slice(appsIdx + '.apps.'.length); // devspc-1d.ctyz.p1.openshiftapps.com
-        const parts = afterApps.split('.');
-        if (parts.length >= 3) {
-          return parts[0]; // cluster short prefix
-        }
-      }
-      if (hostname.startsWith('api.')) {
-        const afterApi = hostname.slice('api.'.length);
-        const parts = afterApi.split('.');
-        if (parts.length >= 3) {
-          return parts[0];
-        }
-      }
-      return hostname;
-    } catch {
-      return url;
-    }
+    return clusterIdFromUrl(url);
   }
 }

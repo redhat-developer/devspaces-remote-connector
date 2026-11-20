@@ -1,4 +1,5 @@
 import { TokenManager, StoredToken } from './TokenManager';
+import { CLUSTERS_STATE_KEY } from '../kubernetes/knownApiUrl';
 
 describe('TokenManager', () => {
   let tokenManager: TokenManager;
@@ -159,5 +160,95 @@ describe('TokenManager', () => {
       };
       expect(tokenManager.needsRefresh(token)).toBe(false);
     });
+  });
+});
+
+class MemoryState {
+  private data = new Map<string, unknown>();
+
+  get<T>(key: string): T | undefined {
+    return this.data.get(key) as T | undefined;
+  }
+
+  async update(key: string, value: unknown): Promise<void> {
+    if (value === undefined) {
+      this.data.delete(key);
+    } else {
+      this.data.set(key, value);
+    }
+  }
+}
+
+describe('TokenManager shared-ingress aliases', () => {
+  const apiUrl = 'https://api.cluster.example.com:6443';
+  const dashboardUrl = 'https://devspaces.apps.shared.example.com';
+  const appsDomain = 'apps.cluster.example.com';
+
+  async function seedCluster(state: MemoryState): Promise<void> {
+    await state.update(CLUSTERS_STATE_KEY, [{
+      id: 'cluster',
+      apiUrl,
+      devSpacesUrl: dashboardUrl,
+      appsDomain,
+    }]);
+  }
+
+  it('finds a token stored under the API server when looking up the CheCluster host, appsDomain, or cluster id', async () => {
+    const state = new MemoryState();
+    const manager = new TokenManager(state as any);
+    await manager.storeToken(apiUrl, {
+      accessToken: 'sha256~from-api', // notsecret — test fixture only
+      clusterUrl: apiUrl,
+      expiresAt: Date.now() + 3600000,
+    });
+    await seedCluster(state);
+
+    expect((await manager.getValidToken(dashboardUrl))?.accessToken).toBe('sha256~from-api'); // notsecret
+    expect((await manager.getValidToken(appsDomain))?.accessToken).toBe('sha256~from-api'); // notsecret
+    expect((await manager.getValidToken('cluster'))?.accessToken).toBe('sha256~from-api'); // notsecret
+    manager.dispose();
+  });
+
+  it('deletes all alias keys for a cluster from a single deleteToken call', async () => {
+    const state = new MemoryState();
+    await seedCluster(state);
+    const manager = new TokenManager(state as any);
+    await manager.storeToken(apiUrl, {
+      accessToken: 'sha256~from-api', // notsecret — test fixture only
+      clusterUrl: apiUrl,
+      expiresAt: Date.now() + 3600000,
+    });
+
+    await manager.deleteToken(dashboardUrl);
+
+    expect(await manager.getValidToken(apiUrl)).toBeUndefined();
+    expect(await manager.getValidToken(dashboardUrl)).toBeUndefined();
+    expect(await manager.getValidToken('cluster')).toBeUndefined();
+    manager.dispose();
+  });
+
+  it('matches ROSA :443 API server tokens after URL.origin strips default HTTPS port 443', async () => {
+    const state = new MemoryState();
+    const rosaApiWithPort = 'https://api.rosa-rwx5g.f8y9.p3.openshiftapps.com:443';
+    const rosaApiOrigin = 'https://api.rosa-rwx5g.f8y9.p3.openshiftapps.com';
+    const rosaCheUrl = 'https://devspaces.apps.rosa.rosa-rwx5g.f8y9.p3.openshiftapps.com';
+
+    await state.update(CLUSTERS_STATE_KEY, [{
+      id: 'rosa-rwx5g',
+      apiUrl: rosaApiOrigin,
+      devSpacesUrl: rosaCheUrl,
+      appsDomain: 'apps.rosa-rwx5g.f8y9.p3.openshiftapps.com',
+    }]);
+
+    const manager = new TokenManager(state as any);
+    await manager.storeToken(rosaApiWithPort, {
+      accessToken: 'sha256~rosa-token', // notsecret — test fixture only
+      clusterUrl: rosaApiWithPort,
+      expiresAt: Date.now() + 3600000,
+    });
+
+    expect((await manager.getValidToken(rosaCheUrl))?.accessToken).toBe('sha256~rosa-token'); // notsecret
+    expect((await manager.getValidToken(rosaApiOrigin))?.accessToken).toBe('sha256~rosa-token'); // notsecret
+    manager.dispose();
   });
 });

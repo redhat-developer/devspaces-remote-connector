@@ -5,6 +5,7 @@ import { WorkspaceTreeProvider } from '../ui/WorkspaceTreeProvider';
 import { ClusterTreeItem } from '../ui/WorkspaceTreeItem';
 import { TokenManager } from '../auth/TokenManager';
 import { OpenShiftAuthProvider } from '../auth/OpenShiftAuthProvider';
+import { storedUrlNamesCluster } from '../kubernetes/knownApiUrl';
 import { STATE_CLUSTER_URL, STATE_CLUSTER_DISPLAY_URL, STATE_ACTIVE_CONNECTION, CTX_AUTHENTICATED, CTX_CONNECTED } from '../constants';
 
 export interface ClusterCommandsDeps {
@@ -53,8 +54,8 @@ export function registerClusterCommands(deps: ClusterCommandsDeps): void {
 
       const entry = await clusterManager.addCluster(url.trim());
 
-      context.globalState.update(STATE_CLUSTER_URL, entry.devSpacesUrl);
-      context.globalState.update(STATE_CLUSTER_DISPLAY_URL, entry.devSpacesUrl);
+      await context.globalState.update(STATE_CLUSTER_URL, entry.devSpacesUrl);
+      await context.globalState.update(STATE_CLUSTER_DISPLAY_URL, entry.devSpacesUrl);
 
       const tp = treeProvider();
       if (tp) {
@@ -102,16 +103,16 @@ export function registerClusterCommands(deps: ClusterCommandsDeps): void {
         }
 
         await cleanupConnection(true);
+        // Clear stored credentials for all aliases before removing cluster mapping
+        await tokenManager.deleteToken(cluster.devSpacesUrl);
         await clusterManager.removeCluster(cluster.id);
 
-        // Clear stored credentials for this cluster
-        await tokenManager.deleteToken(cluster.devSpacesUrl);
-
-        // Clear stored cluster URL if it matches the removed cluster
+        // Clear stored cluster URL if it belongs to the removed cluster
         const storedUrl = context.globalState.get<string>(STATE_CLUSTER_URL);
-        if (storedUrl === cluster.devSpacesUrl) {
-          await context.globalState.update(STATE_CLUSTER_URL, undefined);
-          await context.globalState.update(STATE_CLUSTER_DISPLAY_URL, undefined);
+        if (storedUrlNamesCluster(storedUrl, cluster)) {
+          const remaining = clusterManager.getClusters();
+          await context.globalState.update(STATE_CLUSTER_URL, remaining[0]?.devSpacesUrl);
+          await context.globalState.update(STATE_CLUSTER_DISPLAY_URL, remaining[0]?.devSpacesUrl);
         }
 
         const removedWm = clusterWorkspaceManagers.get(cluster.id);
@@ -153,6 +154,8 @@ export function registerClusterCommands(deps: ClusterCommandsDeps): void {
     vscode.commands.registerCommand('devspaces.signInCluster', async (item?: ClusterTreeItem) => {
       if (!item?.cluster) { return; }
       try {
+        await context.globalState.update(STATE_CLUSTER_URL, item.cluster.devSpacesUrl);
+        await context.globalState.update(STATE_CLUSTER_DISPLAY_URL, item.cluster.devSpacesUrl);
         await authProvider.createSession([]);
         await initCluster(item.cluster.id, item.cluster.devSpacesUrl);
       } catch (err) {
@@ -183,8 +186,6 @@ export function registerClusterCommands(deps: ClusterCommandsDeps): void {
       }
 
       await tokenManager.deleteToken(cluster.devSpacesUrl);
-      await tokenManager.deleteToken(cluster.id);
-      await tokenManager.deleteToken(cluster.appsDomain);
 
       const wm = clusterWorkspaceManagers.get(cluster.id);
       if (wm) {

@@ -37,13 +37,13 @@ jest.mock('../kubernetes/KubeAuthHelper', () => ({
 
 describe('resolverCallbacks', () => {
   describe('createGetKubeConfig', () => {
-    let mockGlobalState: { get: jest.Mock };
+    let mockClusterManager: { getClusters: jest.Mock };
     let mockTokenManager: jest.Mocked<Pick<TokenManager, 'getToken' | 'isTokenValid'>>;
     let mockKubeFactory: { createConfig: jest.Mock };
     let mockClusterDiscovery: { discover: jest.Mock; extractAppsDomain: jest.Mock };
 
     beforeEach(() => {
-      mockGlobalState = { get: jest.fn() };
+      mockClusterManager = { getClusters: jest.fn().mockReturnValue([]) };
       mockTokenManager = {
         getToken: jest.fn(),
         isTokenValid: jest.fn(),
@@ -66,7 +66,7 @@ describe('resolverCallbacks', () => {
       mockTokenManager.getToken.mockResolvedValue(token);
       mockTokenManager.isTokenValid.mockReturnValue(true);
 
-      const getKubeConfig = createGetKubeConfig(mockGlobalState, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
+      const getKubeConfig = createGetKubeConfig(mockClusterManager as any, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
       await getKubeConfig('https://cluster.example.com');
 
       expect(mockKubeFactory.createConfig).toHaveBeenCalledWith('https://api.cluster.example.com:6443', 'sha256~valid');
@@ -75,7 +75,7 @@ describe('resolverCallbacks', () => {
     it('returns undefined when no token available', async () => {
       mockTokenManager.getToken.mockResolvedValue(undefined);
 
-      const getKubeConfig = createGetKubeConfig(mockGlobalState, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
+      const getKubeConfig = createGetKubeConfig(mockClusterManager as any, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
       const result = await getKubeConfig('https://cluster.example.com');
 
       expect(result).toBeUndefined();
@@ -87,7 +87,7 @@ describe('resolverCallbacks', () => {
       mockTokenManager.isTokenValid.mockReturnValue(true);
       mockClusterDiscovery.discover.mockRejectedValue(new Error('network error'));
 
-      const getKubeConfig = createGetKubeConfig(mockGlobalState, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
+      const getKubeConfig = createGetKubeConfig(mockClusterManager as any, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
       const result = await getKubeConfig('https://cluster.example.com');
 
       expect(result).toBeUndefined();
@@ -101,7 +101,7 @@ describe('resolverCallbacks', () => {
         .mockResolvedValueOnce(token);
       mockTokenManager.isTokenValid.mockReturnValue(true);
 
-      const getKubeConfig = createGetKubeConfig(mockGlobalState, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
+      const getKubeConfig = createGetKubeConfig(mockClusterManager as any, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
       const result = await getKubeConfig('https://cluster.example.com', ['my-cluster-id']);
 
       expect(result).toBeDefined();
@@ -110,14 +110,14 @@ describe('resolverCallbacks', () => {
   });
 
   describe('createCheckAndStartWorkspace', () => {
-    let mockGlobalState: { get: jest.Mock };
+    let mockClusterManager: { getClusters: jest.Mock };
     let mockTokenManager: jest.Mocked<Pick<TokenManager, 'getToken' | 'isTokenValid'>>;
     let mockKubeFactory: { createConfig: jest.Mock };
     let mockClusterDiscovery: { discover: jest.Mock; extractAppsDomain: jest.Mock };
     let mockCustomApi: { getNamespacedCustomObject: jest.Mock; patchNamespacedCustomObject: jest.Mock };
 
     beforeEach(() => {
-      mockGlobalState = { get: jest.fn() };
+      mockClusterManager = { getClusters: jest.fn().mockReturnValue([]) };
       mockTokenManager = {
         getToken: jest.fn().mockResolvedValue({ accessToken: 'sha256~token', clusterUrl: 'https://cluster.example.com', expiresAt: Date.now() + 3600000 }),
         isTokenValid: jest.fn().mockReturnValue(true),
@@ -143,11 +143,28 @@ describe('resolverCallbacks', () => {
       };
     });
 
+    it('uses the stored API server for a shared-ingress dashboard', async () => {
+      mockClusterManager.getClusters.mockReturnValue([{
+        id: 'shared',
+        apiUrl: 'https://api.real.example.com:6443',
+        devSpacesUrl: 'https://devspaces.apps.shared.example.com',
+        appsDomain: 'apps.real.example.com',
+      }]);
+      mockCustomApi.getNamespacedCustomObject.mockResolvedValue({ status: { phase: 'Running' } });
+
+      const check = createCheckAndStartWorkspace(mockClusterManager as any, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
+      const result = await check('https://devspaces.apps.shared.example.com', 'user-devspaces', 'empty');
+
+      expect(result).toBe('running');
+      expect(mockClusterDiscovery.discover).not.toHaveBeenCalled();
+      expect(mockKubeFactory.createConfig).toHaveBeenCalledWith('https://api.real.example.com:6443', 'sha256~token');
+    });
+
     it('returns auth_failed when no token available', async () => {
       mockTokenManager.getToken.mockResolvedValue(undefined);
       mockTokenManager.isTokenValid.mockReturnValue(false);
 
-      const check = createCheckAndStartWorkspace(mockGlobalState, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
+      const check = createCheckAndStartWorkspace(mockClusterManager as any, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
       const result = await check('https://cluster.example.com', 'ns', 'ws');
 
       expect(result).toBe('auth_failed');
@@ -156,7 +173,7 @@ describe('resolverCallbacks', () => {
     it('returns auth_failed on 401 Unauthorized', async () => {
       mockCustomApi.getNamespacedCustomObject.mockRejectedValue(new Error('HTTP-Code: 401\nMessage: Unauthorized'));
 
-      const check = createCheckAndStartWorkspace(mockGlobalState, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
+      const check = createCheckAndStartWorkspace(mockClusterManager as any, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
       const result = await check('https://cluster.example.com', 'ns', 'ws');
 
       expect(result).toBe('auth_failed');
@@ -165,7 +182,7 @@ describe('resolverCallbacks', () => {
     it('returns running when workspace is Running', async () => {
       mockCustomApi.getNamespacedCustomObject.mockResolvedValue({ status: { phase: 'Running' } });
 
-      const check = createCheckAndStartWorkspace(mockGlobalState, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
+      const check = createCheckAndStartWorkspace(mockClusterManager as any, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
       const result = await check('https://cluster.example.com', 'ns', 'ws');
 
       expect(result).toBe('running');
@@ -174,7 +191,7 @@ describe('resolverCallbacks', () => {
     it('returns failed on non-auth errors', async () => {
       mockCustomApi.getNamespacedCustomObject.mockRejectedValue(new Error('HTTP-Code: 500\nMessage: Internal Server Error'));
 
-      const check = createCheckAndStartWorkspace(mockGlobalState, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
+      const check = createCheckAndStartWorkspace(mockClusterManager as any, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
       const result = await check('https://cluster.example.com', 'ns', 'ws');
 
       expect(result).toBe('failed');
@@ -185,7 +202,7 @@ describe('resolverCallbacks', () => {
       notFoundErr.statusCode = 404;
       mockCustomApi.getNamespacedCustomObject.mockRejectedValue(notFoundErr);
 
-      const check = createCheckAndStartWorkspace(mockGlobalState, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
+      const check = createCheckAndStartWorkspace(mockClusterManager as any, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
       const result = await check('https://cluster.example.com', 'ns', 'my-deleted-ws');
 
       expect(result).toBe('not_found');
@@ -196,7 +213,7 @@ describe('resolverCallbacks', () => {
       notFoundErr.response = { statusCode: 404 };
       mockCustomApi.getNamespacedCustomObject.mockRejectedValue(notFoundErr);
 
-      const check = createCheckAndStartWorkspace(mockGlobalState, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
+      const check = createCheckAndStartWorkspace(mockClusterManager as any, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
       const result = await check('https://cluster.example.com', 'ns', 'deleted-ws');
 
       expect(result).toBe('not_found');
@@ -207,7 +224,7 @@ describe('resolverCallbacks', () => {
       notFoundErr.body = { code: 404, message: 'devworkspaces.workspace.devfile.io "ws" not found' };
       mockCustomApi.getNamespacedCustomObject.mockRejectedValue(notFoundErr);
 
-      const check = createCheckAndStartWorkspace(mockGlobalState, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
+      const check = createCheckAndStartWorkspace(mockClusterManager as any, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
       const result = await check('https://cluster.example.com', 'ns', 'ws');
 
       expect(result).toBe('not_found');
@@ -217,7 +234,7 @@ describe('resolverCallbacks', () => {
       const notFoundErr = new Error('HTTP-Code: 404\nMessage: Unknown API Status Code!\nBody: "..."');
       mockCustomApi.getNamespacedCustomObject.mockRejectedValue(notFoundErr);
 
-      const check = createCheckAndStartWorkspace(mockGlobalState, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
+      const check = createCheckAndStartWorkspace(mockClusterManager as any, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
       const result = await check('https://cluster.example.com', 'ns', 'deleted-ws');
 
       expect(result).toBe('not_found');
@@ -227,7 +244,7 @@ describe('resolverCallbacks', () => {
       const notFoundErr = new Error('{"kind":"Status","apiVersion":"v1","status":"Failure","message":"not found","code":404}');
       mockCustomApi.getNamespacedCustomObject.mockRejectedValue(notFoundErr);
 
-      const check = createCheckAndStartWorkspace(mockGlobalState, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
+      const check = createCheckAndStartWorkspace(mockClusterManager as any, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
       const result = await check('https://cluster.example.com', 'ns', 'ws');
 
       expect(result).toBe('not_found');
@@ -239,7 +256,7 @@ describe('resolverCallbacks', () => {
       mockCustomApi.getNamespacedCustomObject.mockResolvedValue({ status: { phase: 'Stopped' } });
       mockCustomApi.patchNamespacedCustomObject.mockResolvedValue({});
 
-      const check = createCheckAndStartWorkspace(mockGlobalState, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
+      const check = createCheckAndStartWorkspace(mockClusterManager as any, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
       const result = await check('https://cluster.example.com', 'ns', 'ws');
 
       expect(result).toBe('started');
@@ -256,7 +273,7 @@ describe('resolverCallbacks', () => {
       mockCustomApi.getNamespacedCustomObject.mockResolvedValue({ status: { phase: 'Failed' } });
       mockCustomApi.patchNamespacedCustomObject.mockResolvedValue({});
 
-      const check = createCheckAndStartWorkspace(mockGlobalState, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
+      const check = createCheckAndStartWorkspace(mockClusterManager as any, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
       const result = await check('https://cluster.example.com', 'ns', 'ws');
 
       expect(result).toBe('started');
@@ -268,7 +285,7 @@ describe('resolverCallbacks', () => {
       mockCustomApi.getNamespacedCustomObject.mockResolvedValue({ status: { phase: 'Stopped' } });
       mockCustomApi.patchNamespacedCustomObject.mockResolvedValue({});
 
-      const check = createCheckAndStartWorkspace(mockGlobalState, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
+      const check = createCheckAndStartWorkspace(mockClusterManager as any, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
       const result = await check('https://cluster.example.com', 'ns', 'ws');
 
       expect(result).toBe('failed');
@@ -279,7 +296,7 @@ describe('resolverCallbacks', () => {
       waitForWorkspacePhase.mockResolvedValue(true);
       mockCustomApi.getNamespacedCustomObject.mockResolvedValue({ status: { phase: 'Starting' } });
 
-      const check = createCheckAndStartWorkspace(mockGlobalState, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
+      const check = createCheckAndStartWorkspace(mockClusterManager as any, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
       const result = await check('https://cluster.example.com', 'ns', 'ws');
 
       expect(result).toBe('running');
@@ -291,7 +308,7 @@ describe('resolverCallbacks', () => {
       waitForWorkspacePhase.mockResolvedValue(false);
       mockCustomApi.getNamespacedCustomObject.mockResolvedValue({ status: { phase: 'Starting' } });
 
-      const check = createCheckAndStartWorkspace(mockGlobalState, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
+      const check = createCheckAndStartWorkspace(mockClusterManager as any, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
       const result = await check('https://cluster.example.com', 'ns', 'ws');
 
       expect(result).toBe('failed');
@@ -300,7 +317,7 @@ describe('resolverCallbacks', () => {
     it('returns failed for an unknown phase', async () => {
       mockCustomApi.getNamespacedCustomObject.mockResolvedValue({ status: { phase: 'Terminating' } });
 
-      const check = createCheckAndStartWorkspace(mockGlobalState, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
+      const check = createCheckAndStartWorkspace(mockClusterManager as any, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
       const result = await check('https://cluster.example.com', 'ns', 'ws');
 
       expect(result).toBe('failed');
@@ -309,7 +326,7 @@ describe('resolverCallbacks', () => {
     it('returns failed when workspace has no status', async () => {
       mockCustomApi.getNamespacedCustomObject.mockResolvedValue({});
 
-      const check = createCheckAndStartWorkspace(mockGlobalState, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
+      const check = createCheckAndStartWorkspace(mockClusterManager as any, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
       const result = await check('https://cluster.example.com', 'ns', 'ws');
 
       expect(result).toBe('failed');
@@ -318,7 +335,7 @@ describe('resolverCallbacks', () => {
     it('passes extraKeys to token resolution', async () => {
       mockCustomApi.getNamespacedCustomObject.mockResolvedValue({ status: { phase: 'Running' } });
 
-      const check = createCheckAndStartWorkspace(mockGlobalState, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
+      const check = createCheckAndStartWorkspace(mockClusterManager as any, mockTokenManager as any, mockKubeFactory as any, mockClusterDiscovery as any);
       await check('https://cluster.example.com', 'ns', 'ws', ['cluster-id-123']);
 
       // Token resolution should succeed (no auth_failed) since token is configured in beforeEach
