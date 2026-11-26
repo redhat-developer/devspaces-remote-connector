@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.10.2
+
+- Expired OpenShift tokens start Sign In (browser OAuth) instead of failing until Clear Auth. Restore the saved API server after a restart so re-login does not rediscover the dashboard.
+- If API discovery fails, prompt for the API URL and keep the cluster registration.
+- Use the Dev Spaces route host (`status.cheURL`) after API-server login instead of guessing `devspaces.` from the API name.
+- Keep the API server from sign-in when reconnecting through a shared ingress.
+- Update the active cluster URL only for the cluster that owns it.
+- Give each shared-ingress host its own cluster id so separate clusters behind a shared ingress naming pattern do not collapse into one entry.
+- Keep the OpenShift token when Connect uses that CheCluster host, so a dashboard on a different domain than the API server still finds the stored session.
+- Do not guess `api.` / console from a shared-ingress Dev Spaces URL at sign-in; that lookup hangs. Follow `/oauth/start` to `oauth-openshift`, or ask for the API server URL.
+
 ## 0.7.0
 
 ### Architecture

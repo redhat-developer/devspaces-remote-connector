@@ -13,7 +13,11 @@ jest.mock('vscode', () => ({
   },
   RemoteAuthorityResolver: jest.fn(),
   Disposable: jest.fn(),
-  EventEmitter: jest.fn(),
+  EventEmitter: jest.fn().mockImplementation(() => ({
+    event: jest.fn(),
+    fire: jest.fn(),
+    dispose: jest.fn(),
+  })),
   Uri: {
     parse: jest.fn((uri) => ({ toString: () => uri })),
   },
@@ -31,6 +35,9 @@ jest.mock('vscode', () => ({
   commands: {
     registerCommand: jest.fn(),
     executeCommand: jest.fn(),
+  },
+  ConfigurationTarget: {
+    Global: 1,
   },
 }), { virtual: true });
 

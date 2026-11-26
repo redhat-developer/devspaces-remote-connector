@@ -1,4 +1,15 @@
 import { ClusterDiscovery } from './ClusterDiscovery';
+import { request, HttpError } from '../util/httpClient';
+
+jest.mock('../util/httpClient', () => {
+  const actual = jest.requireActual('../util/httpClient');
+  return {
+    ...actual,
+    request: jest.fn(),
+  };
+});
+
+const mockedRequest = request as jest.MockedFunction<typeof request>;
 
 describe('ClusterDiscovery', () => {
   let discovery: ClusterDiscovery;
@@ -77,9 +88,94 @@ describe('ClusterDiscovery', () => {
   });
 
   describe('buildDevSpacesUrl', () => {
-    it('builds devspaces URL from apps domain', () => {
+    it('keeps a dashboard URL on a shared ingress', () => {
+      expect(discovery.buildDevSpacesUrl('https://devspaces.apps.shared.example.com/dashboard/'))
+        .toBe('https://devspaces.apps.shared.example.com');
+    });
+
+    it('keeps a devspaces URL that already uses the apps domain', () => {
       expect(discovery.buildDevSpacesUrl('https://devspaces.apps.mycluster-01.abc1.p1.openshiftapps.com'))
         .toBe('https://devspaces.apps.mycluster-01.abc1.p1.openshiftapps.com');
+    });
+
+    it('does not use an API server URL as the dashboard', () => {
+      expect(discovery.buildDevSpacesUrl('https://api.cluster.example.com:6443'))
+        .toBe('https://devspaces.apps.cluster.example.com');
+      expect(discovery.buildDevSpacesUrl('https://k8s.corp.example.com:6443'))
+        .toBe('https://devspaces.apps.corp.example.com');
+    });
+  });
+
+  describe('resolveApiUrl', () => {
+    it('keeps the API server URL the user typed or stored', () => {
+      expect(discovery.resolveApiUrl(
+        'https://api.cluster.example.com:6443',
+        'https://api.cluster.example.com:443',
+      )).toBe('https://api.cluster.example.com:6443');
+      expect(discovery.resolveApiUrl(
+        'https://k8s.corp.example.com:6443',
+        '',
+      )).toBe('https://k8s.corp.example.com:6443');
+    });
+
+    it('uses the discovered API server for a dashboard URL', () => {
+      expect(discovery.resolveApiUrl(
+        'https://devspaces.apps.shared.example.com',
+        'https://api.cluster.example.com:6443',
+      )).toBe('https://api.cluster.example.com:6443');
+    });
+  });
+
+  describe('discover', () => {
+    const oauthMeta = {
+      authorization_endpoint: 'https://oauth.example.com/oauth/authorize',
+      token_endpoint: 'https://oauth.example.com/oauth/token',
+    };
+
+    beforeEach(() => {
+      mockedRequest.mockReset();
+    });
+
+    it('uses a pasted API server without probing console on a guessed apps domain', async () => {
+      mockedRequest.mockResolvedValue({
+        statusCode: 200,
+        data: JSON.stringify(oauthMeta),
+        headers: {},
+      });
+
+      const endpoints = await discovery.discover('https://api.cluster.example.com:6443');
+
+      expect(endpoints.apiUrl).toBe('https://api.cluster.example.com:6443');
+      expect(mockedRequest).toHaveBeenCalledTimes(1);
+      expect(mockedRequest.mock.calls[0][0].url).toContain('/.well-known/oauth-authorization-server');
+    });
+
+    it('finds the cluster from a default-domain dashboard via oauth-openshift', async () => {
+      mockedRequest
+        .mockRejectedValueOnce(new HttpError('HTTP 302', 302, '', {
+          location: 'https://oauth-openshift.apps.cluster.example.com/oauth/authorize',
+        }))
+        .mockRejectedValueOnce(new Error('console missing'))
+        .mockResolvedValueOnce({
+          statusCode: 200,
+          data: JSON.stringify(oauthMeta),
+          headers: {},
+        });
+
+      const endpoints = await discovery.discover('https://devspaces.apps.cluster.example.com');
+
+      expect(endpoints.appsDomain).toBe('apps.cluster.example.com');
+      expect(endpoints.apiUrl).toBe('https://api.cluster.example.com:6443');
+    });
+
+    it('does not guess api. from a shared-ingress dashboard that redirects to Entra', async () => {
+      mockedRequest.mockRejectedValue(new HttpError('HTTP 302', 302, '', {
+        location: 'https://login.microsoftonline.com/tenant/oauth2/v2.0/authorize',
+      }));
+
+      await expect(discovery.discover('https://devspaces.apps.shared.example.com'))
+        .rejects.toThrow(/Paste the API server URL/);
+      expect(mockedRequest.mock.calls.some((call) => String(call[0].url).includes('console-openshift-console'))).toBe(false);
     });
   });
 });
