@@ -1,0 +1,32 @@
+name: Code Coverage Report
+
+permissions:
+  contents: read
+  id-token: write
+
+on: [push]
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Set Up NodeJS
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Install npm dependencies
+        run: |
+          npm install
+      - name: Run tests
+        run: |
+          npx jest --coverage
+      - name: Upload Code Coverage Report
+        uses: codecov/codecov-action@v7
+        with:
+          use_oidc: true
+          flags: unit-tests
+          files: ${{ github.workspace }}/coverage/lcov.info
+          fail_ci_if_error: false
