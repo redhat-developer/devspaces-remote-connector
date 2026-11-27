@@ -49,9 +49,6 @@ export class DevfileTaskProvider implements vscode.TaskProvider {
             this.preloadPromise = this.computeTasks()
                 .then(tasks => {
                     this.cachedTasks = tasks;
-                    this.channel.appendLine(
-                        `[Task Provider] Cached ${tasks.length} task(s).`
-                    );
                 })
                 .catch(error => {
                     this.preloadPromise = undefined;
@@ -63,10 +60,6 @@ export class DevfileTaskProvider implements vscode.TaskProvider {
     }
 
     provideTasks(): vscode.ProviderResult<vscode.Task[]> {
-        this.channel.appendLine(
-            `[Task Provider] Returning ${this.cachedTasks.length} cached task(s).`
-        );
-
         return this.cachedTasks;
     }
 
@@ -78,35 +71,40 @@ export class DevfileTaskProvider implements vscode.TaskProvider {
         try {
             const devfileCommands = await this.fetchDevfileCommands();
 
-            const tasks = devfileCommands
-                .filter(command => {
-                    const exec = command.exec;
+            const tasks: vscode.Task[] = [];
 
-                    if (!exec?.commandLine || !exec.component) {
-                        return false;
-                    }
+            for (const command of devfileCommands) {
+                const exec = command.exec;
 
-                    const importedByAttribute =
-                        (command.attributes as Record<string, unknown> | undefined)
-                        ?.['controller.devfile.io/imported-by'];
+                if (!exec?.commandLine || !exec.component) {
+                    continue;
+                }
 
-                    return (
-                        importedByAttribute === undefined ||
-                        importedByAttribute === 'parent'
-                    );
-                })
-                .filter(command =>
-                    !/^init-ssh-agent-command-\d+$/.test(command.id)
-                )
-                .map(command =>
+                const importedByAttribute =
+                    (command.attributes as Record<string, unknown> | undefined)
+                    ?.['controller.devfile.io/imported-by'];
+
+                if (
+                    importedByAttribute !== undefined &&
+                    importedByAttribute !== 'parent'
+                ) {
+                    continue;
+                }
+
+                if (/^init-ssh-agent-command-\d+$/.test(command.id)) {
+                    continue;
+                }
+
+                tasks.push(
                     this.createCheTask(
-                        command.exec?.label || command.id,
-                        command.exec!.commandLine!,
-                        command.exec!.workingDir || '${PROJECT_SOURCE}',
-                        command.exec!.component!,
-                        command.exec!.env
+                        exec.label || command.id,
+                        exec.commandLine,
+                        exec.workingDir || '${PROJECT_SOURCE}',
+                        exec.component,
+                        exec.env
                     )
                 );
+            }
 
             this.channel.appendLine(
                 `Registered ${tasks.length} Devfile task(s).`
@@ -167,7 +165,7 @@ export class DevfileTaskProvider implements vscode.TaskProvider {
             definition,
             vscode.TaskScope.Workspace,
             name,
-            'Devfile',
+            'devfile',
             execution,
             []
         );

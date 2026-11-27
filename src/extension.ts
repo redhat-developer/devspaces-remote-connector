@@ -218,8 +218,6 @@ async function setupRemoteSession(context: vscode.ExtensionContext, effectiveRem
       );
     });
 
-    logger.info('Devfile task provider registered');
-
   } else {
     logger.warn('Remote session: no active connection info found — remote commands unavailable');
   }

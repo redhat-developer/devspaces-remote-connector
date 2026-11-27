@@ -26,6 +26,10 @@ export class K8sFlattenedDevfileReader {
     async get(): Promise<V1alpha2DevWorkspaceSpecTemplate> {
         const raw = await this.getRaw();
 
+        if (!raw.trim()) {
+            throw new Error('Flattened Devfile is empty.');
+        }
+
         const devfile = jsYaml.load(
             raw
         ) as V1alpha2DevWorkspaceSpecTemplate;
@@ -74,7 +78,6 @@ export class K8sFlattenedDevfileReader {
         const location = await this.discoverDevfileLocation(pod);
 
         return this.readFileFromPod(
-            kubeConfig,
             podName,
             location.containerName,
             location.flattenedDevfilePath
@@ -86,32 +89,36 @@ export class K8sFlattenedDevfileReader {
     ): Promise<WorkspaceDevfileLocation> {
 
         const containers = pod.spec?.containers ?? [];
+        const podName = pod.metadata?.name;
+
+        if (!podName) {
+            throw new Error('DevWorkspace pod name is missing.');
+        }
 
         for (const container of containers) {
-            const hasDevfilePath = container.env?.some(
-                env => env.name === 'DEVWORKSPACE_FLATTENED_DEVFILE'
-            );
+            try {
+                const path = await this.execCommand(
+                    podName,
+                    container.name,
+                    ['printenv', 'DEVWORKSPACE_FLATTENED_DEVFILE']
+                );
 
-            if (!hasDevfilePath) {
-                continue;
-            }
+                if (path.trim()) {
 
-            const path = await this.execCommand(
-                pod.metadata!.name!,
-                container.name!,
-                ['printenv', 'DEVWORKSPACE_FLATTENED_DEVFILE']
-            );
-
-            if (path.trim()) {
-                return {
-                    containerName: container.name!,
-                    flattenedDevfilePath: path.trim()
-                };
+                    return {
+                        containerName: container.name,
+                        flattenedDevfilePath: path.trim()
+                    };
+                }
+            } catch {
+                this.channel.appendLine(
+                    `[Devfile Reader] Container '${container.name}' does not expose the flattened Devfile variable.`
+                );
             }
         }
 
         throw new Error(
-            'Unable to discover flattened Devfile path and container.'
+            'Unable to discover flattened Devfile path in any workspace container.'
         );
     }
 
@@ -139,19 +146,6 @@ export class K8sFlattenedDevfileReader {
         stderr.on('data', (chunk: Buffer) => {
             errorOutput += chunk.toString();
         });
-
-        // Diagnostic logs - ADD HERE
-        this.channel.appendLine(
-            `[Devfile Reader] Pod: ${podName}`
-        );
-
-        this.channel.appendLine(
-            `[Devfile Reader] Container: ${containerName}`
-        );
-
-        this.channel.appendLine(
-            `[Devfile Reader] Command: ${command.join(' ')}`
-        );
 
         const websocket = await exec.exec(
             this.namespace,
@@ -191,15 +185,10 @@ export class K8sFlattenedDevfileReader {
 
 
     private async readFileFromPod(
-        _kubeConfig: k8s.KubeConfig,
         podName: string,
         containerName: string,
         flattenedDevfilePath: string
     ): Promise<string> {
-
-        this.channel.appendLine(
-            `[Devfile Reader] Reading ${flattenedDevfilePath}`
-        );
 
         return this.execCommand(
             podName,

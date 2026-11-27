@@ -113,11 +113,9 @@ class KubernetesTaskTerminal implements vscode.Pseudoterminal {
 
             if (!containerName) {
                 if (
-                    this.component === mainContainer &&
-                    availableContainers.includes(mainContainer)
+                    this.component !== mainContainer ||
+                    !availableContainers.includes(mainContainer)
                 ) {
-                    // The main container is available.
-                } else {
                     throw new Error(
                         `Unable to resolve Devfile component '${this.component}' ` +
                         `to a container in pod '${podName}'. ` +
@@ -176,8 +174,6 @@ class KubernetesTaskTerminal implements vscode.Pseudoterminal {
             });
 
             this.socket.on('close', () => {
-                // The Kubernetes status callback normally provides
-                // the actual remote exit code.
                 if (!this.closed) {
                     this.finish(1);
                 }
@@ -211,30 +207,56 @@ class KubernetesTaskTerminal implements vscode.Pseudoterminal {
             );
         }
 
+        // Execute the original Devfile command.
+        // Remaining shell variables are expanded inside the container.
         parts.push(this.command);
 
         return parts.join(' && ');
     }
 
     private resolveWorkingDirectory(): string {
-        const projectSource =
-            this.conn.projectFolder ??
-            vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        let resolved = this.workdir;
 
-        if (this.workdir.includes('${PROJECT_SOURCE}')) {
+        const workspaceFolder =
+            vscode.workspace.workspaceFolders?.[0]?.uri.path;
+
+        const projectSource =
+            this.conn.projectFolder ?? workspaceFolder;
+
+        // Resolve PROJECT_SOURCE.
+        if (resolved.includes('${PROJECT_SOURCE}')) {
             if (!projectSource) {
                 throw new Error(
-                    'Unable to resolve ${PROJECT_SOURCE}: no remote workspace folder found.'
+                    'Unable to resolve ${PROJECT_SOURCE}: workspace folder not found.'
                 );
             }
 
-            return this.workdir.replaceAll(
+            resolved = resolved.replaceAll(
                 '${PROJECT_SOURCE}',
                 projectSource
             );
         }
 
-        return this.workdir;
+        // Resolve PROJECTS_ROOT.
+        // Preserve other variables for expansion inside the container.
+        if (resolved.includes('${PROJECTS_ROOT}')) {
+            resolved = resolved.replaceAll(
+                '${PROJECTS_ROOT}',
+                '/projects'
+            );
+        }
+
+        return this.normalizeContainerPath(resolved);
+    }
+
+    /**
+     * Normalize paths for Linux container execution.
+     * Never use Windows path utilities for container paths.
+     */
+    private normalizeContainerPath(workdir: string): string {
+        return workdir
+            .replace(/\\/g, '/')
+            .replace(/\/+/g, '/');
     }
 
     private shellQuote(value: string): string {
@@ -261,10 +283,6 @@ class KubernetesTaskTerminal implements vscode.Pseudoterminal {
         }
 
         this.closed = true;
-
-        this.writeEmitter.fire(
-            `\r\n[Devfile task finished with exit code ${exitCode}]\r\n`
-        );
 
         this.closeEmitter.fire(exitCode);
     }
