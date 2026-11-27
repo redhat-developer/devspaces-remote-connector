@@ -28,6 +28,8 @@ import {
   STATE_ACTIVE_CONNECTION,
   DEVSPACES_AUTHORITY,
 } from './constants';
+import { KubeAuthHelper } from './kubernetes/KubeAuthHelper';
+import { DevfileTaskProvider } from './devfile/devfileTaskProvider';
 
 let logger: Logger;
 let oldConfig: vscode.WorkspaceConfiguration;
@@ -180,6 +182,42 @@ async function setupRemoteSession(context: vscode.ExtensionContext, effectiveRem
   if (activeConn) {
     logger.info(`Remote session: found connection info for ${activeConn.workspaceName}`);
     registerRemoteCommands(context, activeConn);
+
+    // --- Register Devfile Task Provider ---
+    const kubeClientFactory = new KubeClientFactory();
+
+    const kubeAuthHelper = new KubeAuthHelper(
+      tokenManager,
+      clusterDiscovery,
+      kubeClientFactory
+    );
+
+    const taskOutput = vscode.window.createOutputChannel(
+      'Devfile Tasks'
+    );
+
+    context.subscriptions.push(taskOutput);
+
+    const devfileTaskProvider = new DevfileTaskProvider(
+      taskOutput,
+      activeConn,
+      () => kubeAuthHelper.requireKubeConfig(activeConn.clusterUrl)
+    );
+
+    const registration = vscode.tasks.registerTaskProvider(
+      'devfile',
+      devfileTaskProvider
+    );
+
+    context.subscriptions.push(registration);
+
+    // Preload asynchronously; do not block extension activation.
+    void devfileTaskProvider.preloadTasks().catch(error => {
+      taskOutput.appendLine(
+        `[Task Provider] Preload failed: ${String(error)}`
+      );
+    });
+
   } else {
     logger.warn('Remote session: no active connection info found — remote commands unavailable');
   }

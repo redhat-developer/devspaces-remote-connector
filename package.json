@@ -28,7 +28,8 @@
   "activationEvents": [
     "onView:devspacesWorkspaces",
     "onCommand:devspaces.signIn",
-    "onResolveRemoteAuthority:devspaces"
+    "onResolveRemoteAuthority:devspaces",
+    "onTaskType:devfile"
   ],
   "main": "./dist/extension.js",
   "extensionKind": [
@@ -38,6 +39,28 @@
     "resolvers"
   ],
   "contributes": {
+    "taskDefinitions": [
+      {
+        "type": "devfile",
+        "required": [
+          "command"
+        ],
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "Devfile command line"
+          },
+          "workdir": {
+            "type": "string",
+            "description": "Working directory"
+          },
+          "component": {
+            "type": "string",
+            "description": "Devfile component"
+          }
+        }
+      }
+    ],
     "viewsContainers": {
       "activitybar": [
         {
@@ -511,6 +534,7 @@
     "typescript": "^5.5.0"
   },
   "dependencies": {
+    "@devfile/api": "^2.3.0-1757407014",
     "@kubernetes/client-node": "^1.0.0",
     "js-yaml": "^4.3.2"
   }
